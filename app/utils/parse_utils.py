@@ -8,7 +8,6 @@ from urllib.parse import unquote, urlparse
 
 from markitdown import StreamInfo
 
-from app.infra.oss_client import attach_oss_url
 
 ALLOWED_STRUCTURED_TARGETS = {"titles", "paragraphs", "tables"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
@@ -298,7 +297,6 @@ def extract_images_from_markdown(markdown_text: str) -> Tuple[str, list[dict]]:
                 "placeholder": placeholder,
             }
         )
-        attach_oss_url(images[-1])
         title_part = f' "{title}"' if title else ""
         return f"![{alt}]({placeholder}{title_part})"
 
@@ -334,7 +332,6 @@ def append_image_from_bytes(
         "position": {"line": 1, "column": 1},
         "placeholder": placeholder,
     }
-    attach_oss_url(image)
     return markdown_text, [image]
 
 

@@ -1,6 +1,7 @@
 import hashlib
 import io
 import os
+import time
 from typing import Optional, Sequence
 
 import requests
@@ -15,7 +16,7 @@ from markitdown import (
 
 from app.infra.cache import cache_get, cache_key, cache_max_bytes, cache_set, cache_ttl_seconds
 from app.infra.downloader import fetch
-from app.infra.oss_client import oss_enabled, oss_url_ttl_seconds
+from app.infra.oss_client import oss_enabled, oss_url_ttl_seconds, upload_images_concurrently
 from app.utils.parse_utils import (
     append_image_from_bytes,
     build_structured,
@@ -76,15 +77,29 @@ class ParserService:
                 keep_data_uris,
                 extract_images,
             )
+            download_start = time.monotonic()
             with fetch(url) as response:
                 response.raise_for_status()
                 stream_info = stream_info_from_url(url, response.headers)
+                logger.debug(
+                    "parse_url: stream_info url={} filename={} extension={} mimetype={} charset={}",
+                    url,
+                    stream_info.filename,
+                    stream_info.extension,
+                    stream_info.mimetype,
+                    stream_info.charset,
+                )
                 image_bytes = None
                 file_stream = response.raw
                 content_length = response.headers.get("Content-Length")
                 cacheable = False
                 if content_length and content_length.isdigit():
                     cacheable = int(content_length) <= cache_max_bytes()
+                logger.debug(
+                    "parse_url: content_length={} cacheable_hint={}",
+                    content_length,
+                    cacheable,
+                )
                 if cacheable:
                     body = response.content
                     file_stream = io.BytesIO(body)
@@ -95,19 +110,61 @@ class ParserService:
                     file_stream = io.BytesIO(image_bytes)
                 if image_bytes is not None and not cacheable:
                     cacheable = len(image_bytes) <= cache_max_bytes()
+                if image_bytes is not None:
+                    logger.debug(
+                        "parse_url: image_bytes size={} bytes cacheable={}",
+                        len(image_bytes),
+                        cacheable,
+                    )
+                download_elapsed = time.monotonic() - download_start
+                logger.info(
+                    "parse_url: download done url={} elapsed_ms={}",
+                    url,
+                    int(download_elapsed * 1000),
+                )
+                convert_start = time.monotonic()
                 result = self._md.convert_stream(
                     file_stream,
                     stream_info=stream_info,
                     keep_data_uris=keep_data_uris,
                 )
+                convert_elapsed = time.monotonic() - convert_start
+                logger.info(
+                    "parse_url: convert done url={} elapsed_ms={}",
+                    url,
+                    int(convert_elapsed * 1000),
+                )
 
             markdown = normalize_markdown(result.text_content or "")
             images: list[dict] = []
             if extract_images:
+                extract_start = time.monotonic()
                 markdown, images = extract_images_from_markdown(markdown)
                 if not images and image_bytes is not None:
                     markdown, images = append_image_from_bytes(
                         markdown, image_bytes, stream_info
+                    )
+                    logger.debug(
+                        "parse_url: fallback image_bytes used url={} images={}",
+                        url,
+                        len(images),
+                    )
+                extract_elapsed = time.monotonic() - extract_start
+                logger.info(
+                    "parse_url: extract_images done url={} images={} elapsed_ms={}",
+                    url,
+                    len(images),
+                    int(extract_elapsed * 1000),
+                )
+                if images:
+                    upload_start = time.monotonic()
+                    upload_images_concurrently(images)
+                    upload_elapsed = time.monotonic() - upload_start
+                    logger.info(
+                        "parse_url: upload_images done url={} images={} elapsed_ms={}",
+                        url,
+                        len(images),
+                        int(upload_elapsed * 1000),
                     )
             data = {"markdown": markdown}
             if structured:
@@ -169,6 +226,12 @@ class ParserService:
                 if cached is not None:
                     logger.info("parse_file: cache hit filename={}", file.filename)
                     return cached
+        logger.debug(
+            "parse_file: metadata filename={} content_type={} size_bytes={}",
+            file.filename,
+            file.content_type,
+            file_size,
+        )
 
         try:
             logger.info(
@@ -179,10 +242,17 @@ class ParserService:
                 extract_images,
             )
             file.file.seek(0)
+            convert_start = time.monotonic()
             stream_info = StreamInfo(
                 filename=file.filename,
                 extension=os.path.splitext(file.filename)[1] or None,
                 mimetype=file.content_type,
+            )
+            logger.debug(
+                "parse_file: stream_info filename={} extension={} mimetype={}",
+                stream_info.filename,
+                stream_info.extension,
+                stream_info.mimetype,
             )
             image_bytes = None
             file_stream = file.file
@@ -194,18 +264,52 @@ class ParserService:
                     file.file.seek(0)
                 else:
                     image_bytes = file_bytes
+            if image_bytes is not None:
+                logger.debug(
+                    "parse_file: image_bytes size={} bytes",
+                    len(image_bytes),
+                )
             result = self._md.convert_stream(
                 file_stream,
                 stream_info=stream_info,
                 keep_data_uris=keep_data_uris,
             )
+            convert_elapsed = time.monotonic() - convert_start
+            logger.info(
+                "parse_file: convert done filename={} elapsed_ms={}",
+                file.filename,
+                int(convert_elapsed * 1000),
+            )
             markdown = normalize_markdown(result.text_content or "")
             images: list[dict] = []
             if extract_images:
+                extract_start = time.monotonic()
                 markdown, images = extract_images_from_markdown(markdown)
                 if not images and image_bytes is not None:
                     markdown, images = append_image_from_bytes(
                         markdown, image_bytes, stream_info
+                    )
+                    logger.debug(
+                        "parse_file: fallback image_bytes used filename={} images={}",
+                        file.filename,
+                        len(images),
+                    )
+                extract_elapsed = time.monotonic() - extract_start
+                logger.info(
+                    "parse_file: extract_images done filename={} images={} elapsed_ms={}",
+                    file.filename,
+                    len(images),
+                    int(extract_elapsed * 1000),
+                )
+                if images:
+                    upload_start = time.monotonic()
+                    upload_images_concurrently(images)
+                    upload_elapsed = time.monotonic() - upload_start
+                    logger.info(
+                        "parse_file: upload_images done filename={} images={} elapsed_ms={}",
+                        file.filename,
+                        len(images),
+                        int(upload_elapsed * 1000),
                     )
             data = {"markdown": markdown}
             if structured:
