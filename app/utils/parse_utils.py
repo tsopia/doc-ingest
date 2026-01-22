@@ -96,6 +96,8 @@ def parse_structured(raw: object) -> Tuple[Optional[list[str]], Optional[str]]:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             return None, "structured must be a JSON array"
+        if parsed is None:
+            return None, None
         if not isinstance(parsed, list):
             return None, "structured must be a JSON array"
         candidates = parsed
@@ -274,6 +276,10 @@ def is_image_stream(stream_info: StreamInfo) -> bool:
 
 
 def extract_images_from_markdown(markdown_text: str) -> Tuple[str, list[dict]]:
+    import time
+    from loguru import logger
+
+    start = time.monotonic()
     images: list[dict] = []
 
     def replace(match: re.Match) -> str:
@@ -301,6 +307,12 @@ def extract_images_from_markdown(markdown_text: str) -> Tuple[str, list[dict]]:
         return f"![{alt}]({placeholder}{title_part})"
 
     replaced = IMAGE_DATA_URI_RE.sub(replace, markdown_text)
+    elapsed = time.monotonic() - start
+    logger.debug(
+        "extract_images_from_markdown: images={} elapsed_ms={}",
+        len(images),
+        int(elapsed * 1000),
+    )
     return replaced, images
 
 
@@ -336,6 +348,10 @@ def append_image_from_bytes(
 
 
 def build_structured(markdown_text: str, targets: Sequence[str]) -> dict:
+    import time
+    from loguru import logger
+
+    start = time.monotonic()
     titles: list[str] = []
     paragraphs: list[str] = []
     tables: list[str] = []
@@ -375,4 +391,14 @@ def build_structured(markdown_text: str, targets: Sequence[str]) -> dict:
         structured["paragraphs"] = paragraphs
     if "tables" in wanted:
         structured["tables"] = tables
+
+    elapsed = time.monotonic() - start
+    logger.debug(
+        "build_structured: targets={} titles={} paragraphs={} tables={} elapsed_ms={}",
+        targets,
+        len(titles),
+        len(paragraphs),
+        len(tables),
+        int(elapsed * 1000),
+    )
     return structured

@@ -1,175 +1,190 @@
-## Doc Ingest Service
+# Doc Ingest Service
 
-基于 FastAPI + MarkItDown 的文档解析服务，支持：
-- URL 下载解析
-- 文件上传解析
-- 可选结构化结果（titles/paragraphs/tables）
-- 可选图片抽取（data URI -> 占位符 + images 列表）
+基于 FastAPI + MarkItDown 的文档解析服务，支持多模态模型整理、实时流式输出和全链路追踪。
+
+## ✨ 核心特性
+
+- **多模态解析**：支持 URL 下载和文件上传，自动提取结构化数据（标题/段落/表格）
+- **AI 智能整理**：集成 GPT-4o/Qwen-VL 等多模态模型，对文档内容进行深度整理
+- **实时流式响应**：支持 SSE（Server-Sent Events）流式输出，大文件处理不超时，提供"打字机"体验
+- **全链路可观测**：自动生成 `x-trace-id`，支持请求链路追踪和性能分析
+- **智能重试**：内置模型调用重试机制，提升稳定性
+- **对象存储集成**：支持将提取的图片上传至 S3/OSS 兼容存储
 
 ---
 
-## 接口
+## 🚀 快速开始
 
-### 1) URL 解析
-`POST /convert/url`
-
-请求体（JSON）：
-```json
-{
-  "url": "https://example.com/file.docx",
-  "structured": ["titles", "paragraphs", "tables"],
-  "keep_data_uris": true,
-  "extract_images": true
-}
+### 1. 安装依赖
+```bash
+uv sync
 ```
 
-字段说明：
-- `url`：必填，http/https 可下载地址
-- `structured`：可选，结构化目标数组，仅支持 `titles/paragraphs/tables`
-- `keep_data_uris`：可选，默认 `true`，保留 data URI（图片 base64）
-- `extract_images`：可选，默认 `true`，提取图片并替换为占位符
+### 2. 启动服务
+```bash
+# 开发模式
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-### 2) 文件上传解析
-`POST /convert/file`
+# 生产模式
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+```
 
-表单字段（multipart/form-data）：
-- `file`：必填，上传文件
-- `structured`：可选，JSON 数组字符串，例如 `["titles","tables"]`
-- `keep_data_uris`：可选，默认 `true`
-- `extract_images`：可选，默认 `true`
+### 3. Docker 部署
+```bash
+docker-compose up -d
+```
 
-curl 示例：
+### 4. 健康检查
+```bash
+curl http://localhost:8000/health
+# {"status":"healthy","service":"doc-ingest","version":"0.1.0"}
+```
+
+---
+
+## ⚙️ 配置说明
+
+所有配置均支持 `.env` 文件，统一前缀 `DOC_INGEST__`。
+
+### 核心配置
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `DOC_INGEST__LOG__LEVEL` | `INFO` | 日志级别 (DEBUG/INFO/WARNING/ERROR) |
+
+### 模型配置 (AI 整理)
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `DOC_INGEST__MODEL__API_KEY` | - | **必填** 模型 API Key |
+| `DOC_INGEST__MODEL__BASE_URL` | - | API Base URL (兼容 OpenAI 格式) |
+| `DOC_INGEST__MODEL__MODEL_NAME` | `gpt-4o` | 模型名称 (如 qwen-plus, deepseek-chat) |
+| `DOC_INGEST__MODEL__TIMEOUT_SECONDS` | `120` | 模型超时时间 |
+| `DOC_INGEST__MODEL__MAX_INPUT_TOKENS` | `25000` | 最大输入 Token 限制 |
+
+### SSE 流式配置
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `DOC_INGEST__SSE__HEARTBEAT_INTERVAL` | `10` | 心跳间隔（秒） |
+| `DOC_INGEST__SSE__LONG_STAGE_THRESHOLD` | `10` | 触发心跳的阶段耗时阈值（秒） |
+
+### 对象存储 (OSS/S3)
+| 环境变量 | 说明 |
+|---------|------|
+| `DOC_INGEST__OSS__ENDPOINT` | S3/OSS Endpoint 地址 |
+| `DOC_INGEST__OSS__ACCESS_KEY_ID` | Access Key ID |
+| `DOC_INGEST__OSS__ACCESS_KEY_SECRET` | Access Key Secret |
+| `DOC_INGEST__OSS__BUCKET` | 存储桶名称 |
+| `DOC_INGEST__OSS__URL_TTL_SECONDS` | 下载链接有效期（默认 1800s） |
+
+---
+
+## 🔌 API 接口
+
+### 1. 同步接口 (Standard API)
+
+适用于不需要实时反馈的场景（如后台批处理）。
+
+**POST** `/convert/file`
+
 ```bash
 curl -X POST "http://localhost:8000/convert/file" \
-  -F "file=@/path/to/sample.docx" \
-  -F 'structured=["titles","paragraphs"]' \
-  -F "keep_data_uris=true" \
+  -F "file=@/path/to/doc.pdf" \
+  -F "structured=[\"titles\",\"tables\"]" \
   -F "extract_images=true"
 ```
 
----
+### 2. 流式接口 (Streaming/SSE API) 🔥
 
-## 返回结构
+**推荐使用**。适用于 Web 应用，提供实时进度和模型输出的"打字机"效果，彻底解决大文件超时问题。
 
-统一返回格式：
-```json
-{
-  "code": 0,
-  "data": {},
-  "msg": ""
-}
-```
-
-`data` 字段内容：
-- `markdown`：MarkItDown 解析后的 Markdown 文本
-- `structured`（可选）：结构化结果对象（由 `structured` 控制）
-- `images`（可选）：图片列表（由 `extract_images` 控制）
-
-### structured 结构示例
-```json
-{
-  "titles": ["标题1", "标题2"],
-  "paragraphs": ["段落1", "段落2"],
-  "tables": ["|a|b|", "|1|2|"]
-}
-```
-
-### images 结构示例
-```json
-[
-  {
-    "id": "img_1",
-    "mime": "image/jpeg",
-    "base64": "...",
-    "url": "https://oss-example/xxx?Expires=...",
-    "url_expires_in": 1800,
-    "alt": "logo",
-    "title": null,
-    "position": { "line": 12, "column": 5 },
-    "placeholder": "image://img_1"
-  }
-]
-```
-
-说明：
-- 文本中的图片会被替换为 `![alt](image://img_n)` 占位符
-- `images` 列表中包含图片的位置信息，未启用 OSS 时包含 `base64`
-- 若配置 OSS，会返回 `url`（30 分钟有效），并移除 `base64`
-- `base64` 会显著增大响应体积（约 +33%），大文件建议关闭 `extract_images`
-
----
-
-## 多模态示例（顺序交替）
-
-当你要把结果交给多模态模型时，推荐“文本 + 图片交替输入”的方式：
-
-```json
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": [
-        { "type": "text", "text": "第一段文本... image://img_1 ..." },
-        { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,BASE64_1" } },
-        { "type": "text", "text": "第二段文本... image://img_2 ..." },
-        { "type": "image_url", "image_url": { "url": "data:image/png;base64,BASE64_2" } },
-        { "type": "text", "text": "第三段文本... image://img_3 ..." },
-        { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,BASE64_3" } }
-      ]
-    }
-  ]
-}
-```
-
-要点：
-- `markdown` 里用占位符标记图片位置（例如 `image://img_1`）
-- `images` 列表提供 `id -> base64/url` 的对应关系
-- 发送给模型时按顺序交替插入即可
-
----
-
-## 缓存策略
-
-为了避免短时间内重复解析相同文件，服务端提供内存缓存：
-- URL 请求：以 `url + 参数` 作为缓存键（TTL 到期自动失效）
-- 文件上传：对小文件计算内容哈希作为缓存键
-- 仅缓存小文件（默认 `<= 5MB`），超出则不缓存以避免内存压力
-- 多进程部署时为“每个 worker 独立缓存”
-
-可通过环境变量调整（支持 `.env`，使用统一前缀 `DOC_INGEST__`）：
-- `DOC_INGEST__CACHE__ENABLED`：是否启用缓存（默认 `true`）
-- `DOC_INGEST__CACHE__TTL_SECONDS`：缓存 TTL 秒数（默认 `300`）
-- `DOC_INGEST__CACHE__MAX_ENTRIES`：缓存最大条目数（默认 `256`）
-- `DOC_INGEST__CACHE__MAX_BYTES`：缓存最大文件字节数（默认 `5242880`）
-示例：`DOC_INGEST__CACHE__TTL_SECONDS=300`
-
-下载配置：
-- `DOC_INGEST__DOWNLOAD__TIMEOUT_SECONDS`：下载超时秒数（默认 `30`）
-
----
-
-## OSS 图片上传
-
-当启用图片抽取时，服务可将图片上传至 OSS 并返回临时下载地址（默认 30 分钟）。
-
-环境变量（支持 `.env`，使用统一前缀 `DOC_INGEST__`）：
-- `DOC_INGEST__OSS__ENDPOINT`：OSS Endpoint，例如 `https://oss-cn-hangzhou.aliyuncs.com`
-- `DOC_INGEST__OSS__ACCESS_KEY_ID`：AccessKey ID
-- `DOC_INGEST__OSS__ACCESS_KEY_SECRET`：AccessKey Secret
-- `DOC_INGEST__OSS__BUCKET`：Bucket 名称
-- `DOC_INGEST__OSS__PREFIX`：对象前缀（默认 `doc-ingest/`）
-- `DOC_INGEST__OSS__URL_TTL_SECONDS`：下载地址有效期秒数（默认 `1800`）
-- `DOC_INGEST__OSS__SECURE`：是否使用 https（默认 `true`）
-示例：`DOC_INGEST__OSS__BUCKET=your-bucket`
-
-说明：
-- 若未配置 OSS 相关环境变量，则不上传，仍返回 `base64`
-- 若 `CACHE_TTL_SECONDS` 大于 `OSS_URL_TTL_SECONDS`，缓存会自动跳过以避免返回过期链接
-
----
-
-## 运行
+**POST** `/convert/file/stream`
 
 ```bash
-uvicorn app.main:app --reload
+curl -N -X POST "http://localhost:8000/convert/file/stream" \
+  -F "file=@/path/to/large_doc.pdf"
+```
+
+**响应格式 (Server-Sent Events)**:
+
+```
+data: {"type": "started", "progress": 0, "message": "开始处理"}
+
+data: {"type": "stage:converting", "progress": 5, "message": "文档转换中"}
+
+data: {"type": "stage:extracting_done", "progress": 20, "data": {"images": [...]}}
+
+data: {"type": "model_chunk", "data": {"content": "AI 解析的"}}
+
+data: {"type": "model_chunk", "data": {"content": "内容片段..."}}
+
+data: {"type": "complete", "progress": 100, "message": "处理完成"}
+```
+
+**前端集成示例 (JavaScript)**:
+
+```javascript
+const response = await fetch('/convert/file/stream', { method: 'POST', body: formData });
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  const events = decoder.decode(value).split('\n\n');
+  for (const event of events) {
+    if (event.startsWith('data: ')) {
+      const data = JSON.parse(event.slice(6));
+      if (data.type === 'model_chunk') {
+        console.log(data.data.content); // 实时渲染 markdown
+      }
+    }
+  }
+}
+```
+
+---
+
+## 🔍 可观测性 (Observability)
+
+### Trace ID 追踪
+
+每个请求都会自动分配一个唯一的 `trace_id`，贯穿整个处理链路。
+
+- **请求头**: `x-trace-id` (支持自定义传入)
+- **响应头**: `x-trace-id` (返回分配的 ID)
+- **日志**: 所有日志条目包含 `[trace_id=...]`
+
+### 性能监控
+
+日志中会自动记录关键阶段的性能指标，包括模型处理详情：
+
+```log
+# 示例日志
+INFO | [trace_id=abc123] | Model performance: model=qwen-plus ttfb_ms=2345 total_ms=89745 output_chars=1650 chars_per_sec=18.40 chunks=42
+```
+
+- **ttfb_ms**: 首字时间 (Time To First Byte)
+- **chars_per_sec**: 生成速度 (吞吐量)
+- **total_ms**: 总处理耗时
+
+---
+
+## 📚 返回参数说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `markdown` | string | 解析后的 Markdown 文本（包含图片占位符） |
+| `images` | list | 图片列表，包含 URL 或 Base64 |
+| `structured` | object | 结构化数据（如 `titles`, `tables`） |
+
+**多模态处理建议**:
+当需要将结果传递给 LLM 时，建议使用 `markdown` 中的图片占位符（如 `image://img_1`）配合 `images` 列表中的 URL，以交替格式构建 prompt。
+
+---
+
+## 🧪 开发与测试
+
+运行 SSE 测试脚本：
+```bash
+python scripts/test_sse.py test_files/sample.pdf
 ```

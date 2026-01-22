@@ -11,6 +11,16 @@ router = APIRouter()
 _service = ParserService()
 
 
+@router.get("/health")
+def health_check() -> dict:
+    """健康检查端点,用于 K8s/Docker 等容器编排工具"""
+    return {
+        "status": "healthy",
+        "service": "doc-ingest",
+        "version": "0.1.0"
+    }
+
+
 class UrlRequest(BaseModel):
     url: str
     structured: Optional[list[str]] = None
