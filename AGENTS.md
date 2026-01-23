@@ -47,7 +47,7 @@ app/
 - `complete` 事件不携带业务数据，仅作结束标记
 
 ### 3. 内存管理 ⚠️ 关键
-文档处理涉及大量内存操作，必须遵守：
+文档处理涉及大量内存操作，必须遵守严格的 GC 策略：
 ```python
 import gc
 
@@ -56,10 +56,14 @@ markdown = normalize_markdown(result.text_content or "")
 del result
 del md
 
-# 2. 上传完成后清理 base64 数据
-for img in images:
-    if "base64" in img:
-        del img["base64"]
+# 2. 图片 base64 清理策略
+# A. OSS 上传成功后（storage_client.py）
+#    -> 立即 pop("base64")
+# B. OSS 上传失败或未启用 OSS
+#    -> 保留 base64 作为 fallback 供模型处理
+# C. 模型处理完成后（model_service.py）
+#    -> 立即清理所有图片的 base64 (del img["base64"])
+#    -> 如为分块处理，每个 chunk 完成后即清理
 
 # 3. 模型处理后释放中间变量
 del chunks, content, messages, full_result

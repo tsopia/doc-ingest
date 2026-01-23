@@ -38,7 +38,10 @@ WORKDIR /app
 
 # 1. 安装系统依赖 (ffmpeg)
 # 这一层会被长久缓存，除非 apt 参数变更
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. 从 builder 阶段复制构建好的虚拟环境

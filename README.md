@@ -87,9 +87,7 @@ curl http://localhost:8000/health
 
 ```bash
 curl -X POST "http://localhost:8000/convert/file" \
-  -F "file=@/path/to/doc.pdf" \
-  -F "structured=[\"titles\",\"tables\"]" \
-  -F "extract_images=true"
+  -F "file=@/path/to/doc.pdf"
 ```
 
 ### 2. 流式接口 (Streaming/SSE API) 🔥
@@ -110,7 +108,7 @@ data: {"type": "started", "progress": 0, "message": "开始处理"}
 
 data: {"type": "stage:converting", "progress": 5, "message": "文档转换中"}
 
-data: {"type": "stage:extracting_done", "progress": 20, "data": {"images": [...]}}
+data: {"type": "stage:structuring_done", "progress": 20, "message": "结构化处理完成"}
 
 data: {"type": "model_chunk", "data": {"content": "AI 解析的"}}
 
@@ -118,6 +116,7 @@ data: {"type": "model_chunk", "data": {"content": "内容片段..."}}
 
 data: {"type": "complete", "progress": 100, "message": "处理完成"}
 ```
+*(注：图片提取、上传等阶段也会有相应的进度事件)*
 
 **前端集成示例 (JavaScript)**:
 
@@ -172,13 +171,14 @@ INFO | [trace_id=abc123] | Model performance: model=qwen-plus ttfb_ms=2345 total
 ## 📚 返回参数说明
 
 | 字段 | 类型 | 说明 |
-|------|------|------|
+|----------|----------|----------|
 | `markdown` | string | 解析后的 Markdown 文本（包含图片占位符） |
-| `images` | list | 图片列表，包含 URL 或 Base64 |
-| `structured` | object | 结构化数据（如 `titles`, `tables`） |
+| `images` | list | 图片列表 (根据配置返回 URL 或 Base64 或不返回) |
 
-**多模态处理建议**:
-当需要将结果传递给 LLM 时，建议使用 `markdown` 中的图片占位符（如 `image://img_1`）配合 `images` 列表中的 URL，以交替格式构建 prompt。
+**输出策略**:
+1. **有模型**: 返回模型处理后的 markdown，`images` 列表为空（图片已由模型消费）。
+2. **无模型 + OSS**: 返回 markdown 和包含 URL 的 `images` 列表。
+3. **无模型 + 无 OSS**: 返回 markdown 和包含 Base64 的 `images` 列表。
 
 ---
 

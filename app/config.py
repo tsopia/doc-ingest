@@ -49,29 +49,47 @@ class ModelSettings(BaseModel):
     )
     system_prompt: str = Field(
         default=(
-            "你是专业的文档整理助手。你的任务是将原始 markdown 文本整理为结构清晰、内容完整的文档。\n\n"
-            "输入说明：\n"
+            "你是专业的文档处理助手。你的任务是处理包含图片占位符的 markdown 文本。\n\n"
+            "核心原则：\n"
+            "1. 【保留语义】：保持原有内容的完整性和逻辑结构，严格保留正文文本。\n"
+            "2. 【智能清洗】：识别并移除文档转换产生的噪音，如页眉、页脚、页码（如 'Page 1 of 10'）、水印残留、无意义的分隔符或乱码字符。\n"
+            "3. 【仅处理图片】：将图片占位符（image://img_n）替换为对应图片的文字描述。\n\n"
+            "输入格式：\n"
             "- 原始文本中图片位置用 image://img_n 占位符标记\n"
             "- 对应图片会按顺序提供\n\n"
-            "输出要求：\n"
-            "- 结合文本与图片内容，输出整理后的 Markdown\n"
-            "- 图片内容需转化为文字描述，融入上下文，不保留占位符"
+            "输出格式：\n"
+            "- 输出处理后的 Markdown，正文内容保持不变（除清洗噪音外）\n"
+            "- 图片占位符替换为图片内容的文字描述"
         ),
     )
     task_prompt: str = Field(
         default=(
-            "请将内容整理为结构清晰的 Markdown，要求：\n\n"
-            "1. **信息保真**：保持原有信息不丢失，不新增虚构内容\n\n"
-            "2. **图片处理**：根据图片类型采用适当描述，完全替换占位符：\n"
+            "请处理以下内容，要求：\n\n"
+            "1. **智能清洗噪音**：\n"
+            "   - 删除所有页码（如 '1 / 20', '- 5 -' 等）\n"
+            "   - 删除页眉页脚信息（如文件名、日期、公司机密声明等出现在页边缘的内容）\n"
+            "   - 删除文档转换产生的无意义字符或乱码\n"
+            "   - **注意**：必须仔细辨别，严禁误删正文内容、章节标题或正文中的数字列表\n\n"
+            "2. **严格保留原文**：除上述清洗外，保持原有文字内容、段落结构、标题层级完全不变\n\n"
+            "3. **图片描述替换**：将 image://img_n 占位符替换为图片内容描述：\n"
             "   - 简单示意/装饰图：1-2句概括\n"
             "   - UI截图：描述界面主体功能和关键元素\n"
-            "   - 流程图/架构图：用列表或分点描述主要节点和关系\n"
+            "   - 流程图/架构图：用列表描述主要节点和关系\n"
             "   - 表格/数据图：尽量以文字表格还原数据\n"
             "   - 若图片无法识别，标注 [图片内容不可识别]\n\n"
-            "3. **结构优化**：优化段落层级与标题（必要时补充小标题）\n\n"
-            "4. **表格保留**：表格保持 Markdown 表格格式\n\n"
-            "5. **纯净输出**：直接输出 Markdown，不要使用代码块包裹，不要额外解释"
+            "4. **禁止改写**：不要修改原文措辞，不要重新组织段落，不要添加总结\n\n"
+            "5. **纯净输出**：直接输出处理后的 Markdown，不要使用代码块包裹，不要额外解释"
         ),
+    )
+    chunk_max_tokens: int = Field(
+        default=8000,
+        ge=1000,
+        description="每个 chunk 的最大 tokens（文本切分）",
+    )
+    chunk_overlap_tokens: int = Field(
+        default=200,
+        ge=0,
+        description="chunk 间的重叠 tokens（用于上下文）",
     )
 
 
@@ -143,12 +161,29 @@ class SSESettings(BaseModel):
     )
 
 
+class LangfuseSettings(BaseModel):
+    """Langfuse 可观测性配置（可选，配置密钥即自动启用）"""
+    public_key: str = Field(
+        default="",
+        description="Langfuse Public Key",
+    )
+    secret_key: str = Field(
+        default="",
+        description="Langfuse Secret Key",
+    )
+    host: str = Field(
+        default="https://cloud.langfuse.com",
+        description="Langfuse Host URL",
+    )
+
+
 class Settings(BaseSettings):
     model: ModelSettings = ModelSettings()
     storage: StorageSettings = StorageSettings()
     download: DownloadSettings = DownloadSettings()
     log: LogSettings = LogSettings()
     sse: SSESettings = SSESettings()
+    langfuse: LangfuseSettings = LangfuseSettings()
 
     model_config = SettingsConfigDict(
         env_prefix=ENV_PREFIX,

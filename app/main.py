@@ -71,7 +71,7 @@ def _configure_logging() -> None:
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
     # Suppress verbose pdfminer logs
-    logging.getLogger("pdfminer").setLevel(logging.ERROR)
+    logging.getLogger("pdfminer").setLevel(logging.WARNING)
 
 _configure_logging()
 

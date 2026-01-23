@@ -1,13 +1,16 @@
+import gc
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 from loguru import logger
-from openai import OpenAI, OpenAIError
+from openai import OpenAIError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import get_settings
+from app.utils.observability import observe, get_openai_client
+from app.utils.text_splitter import TextSplitter, TextChunk, need_chunking
 
 
 class ModelService:
@@ -18,12 +21,24 @@ class ModelService:
         self._client = None
         if self._settings.api_key:
             try:
-                self._client = OpenAI(
+                self._client = get_openai_client(
                     api_key=self._settings.api_key,
                     base_url=self._settings.base_url or None,
                 )
             except Exception as e:
                 logger.error(f"Failed to initialize OpenAI client: {e}")
+
+        # 初始化文本切分器
+        self._splitter = TextSplitter(
+            max_tokens=getattr(self._settings, 'chunk_max_tokens', 8000),
+            overlap_tokens=getattr(self._settings, 'chunk_overlap_tokens', 200)
+        )
+
+    def _clear_images_base64(self, images: list[dict]) -> None:
+        """清理图片的 base64 数据以释放内存"""
+        for img in images:
+            if "base64" in img:
+                del img["base64"]
 
     def _image_url_map(self, images: list[dict]) -> dict[str, str]:
         mapping: dict[str, str] = {}
@@ -185,6 +200,120 @@ class ModelService:
             return full_result
 
         return _do_call()
+
+    @observe(name="process_document_chunked")
+    def process_document_chunked(
+        self,
+        markdown: str,
+        images: list[dict],
+        on_token: Optional[Callable[[str], None]] = None,
+        on_heartbeat: Optional[Callable[[], None]] = None
+    ) -> str:
+        """
+        分块处理文档（如果需要）
+
+        Args:
+            markdown: 文本内容（含占位符）
+            images: 图片列表（可能是 URL 或 base64）
+            on_token: SSE 流式输出回调（暂不使用）
+            on_heartbeat: SSE 心跳回调（暂不使用）
+
+        Returns:
+            处理后的文本
+        """
+        # 判断是否需要切分
+        if not need_chunking(markdown, images, self._settings.max_input_tokens):
+            logger.info("Document is small, processing without chunking")
+            result = self.process_document(markdown, images)
+            # 非分块处理完成后也清理 base64
+            self._clear_images_base64(images)
+            return result
+
+        logger.info("Document is large, processing with chunking")
+        chunks = self._splitter.split(markdown)
+        logger.info(f"Split into {len(chunks)} chunks")
+
+        if len(chunks) == 1:
+            return self.process_document(
+                self._build_chunk_prompt(chunks[0]),
+                self._filter_chunk_images(chunks[0].text, images)
+            )
+
+        # 串行处理每个 chunk
+        results = []
+        for chunk in chunks:
+            # 筛选该 chunk 引用的图片
+            chunk_images = self._filter_chunk_images(chunk.text, images)
+
+            logger.info(
+                f"Processing chunk {chunk.index + 1}/{chunk.total} "
+                f"with {len(chunk_images)} images"
+            )
+
+            # 构建 prompt 并处理
+            prompt = self._build_chunk_prompt(chunk)
+            result = self.process_document(prompt, chunk_images)
+            results.append(result)
+
+            # 及时释放该 chunk 的图片内存
+            self._clear_images_base64(chunk_images)
+            gc.collect()
+
+        return self._merge_results(results)
+
+    def _filter_chunk_images(self, chunk_text: str, all_images: list[dict]) -> list[dict]:
+        """
+        筛选 chunk 中引用的图片
+
+        Args:
+            chunk_text: chunk 文本（含占位符）
+            all_images: 全部图片列表
+
+        Returns:
+            该 chunk 引用的图片列表
+        """
+        # 提取 chunk 中的图片占位符 ID
+        referenced_ids = set(re.findall(r'image://(img_\d+)', chunk_text))
+
+        # 筛选图片
+        chunk_images = [img for img in all_images if img.get('id') in referenced_ids]
+        return chunk_images
+
+    def _build_chunk_prompt(self, chunk: TextChunk) -> str:
+        """
+        构建 chunk 的 prompt
+
+        包含位置信息，强调保留原文
+        """
+        if chunk.total == 1:
+            # 单个 chunk，直接返回
+            return chunk.text
+
+        # 多个 chunk，添加明确的保留原文指令
+        parts = [
+            f"【这是文档的第 {chunk.index + 1}/{chunk.total} 部分。"
+            f"请严格保持原文内容和结构，仅将图片占位符替换为图片内容描述，不要改写或重新组织内容】\n\n"
+        ]
+
+        parts.append(chunk.text)
+
+        return "".join(parts)
+
+    def _merge_results(self, results: list[str]) -> str:
+        """
+        合并多个 chunk 的结果
+
+        简单策略：用换行拼接
+        """
+        # 去除可能的开头套话
+        cleaned = []
+        for result in results:
+            # 简单去除常见套话模式
+            result = result.strip()
+            if result:
+                cleaned.append(result)
+
+        return "\n\n".join(cleaned)
 
     def process_document(
         self, markdown: str, images: list[dict]
