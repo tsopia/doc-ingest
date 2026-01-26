@@ -48,14 +48,15 @@ def _get_langfuse():
             public_key=settings.public_key,
             secret_key=settings.secret_key,
             host=settings.host,
+            timeout=60,  # 增加超时到 60 秒（高延迟网络）
+            flush_interval=5,  # 每 5 秒刷新一次（更频繁上传）
         )
-        logger.info(f"Langfuse initialized successfully: host={settings.host}")
+        logger.info(f"Langfuse client initialized: host={settings.host}")
         return _langfuse_client
     except Exception as e:
         logger.error(
             f"Failed to initialize Langfuse client: {type(e).__name__}: {e}\n"
-            f"Host: {settings.host if 'settings' in locals() else 'unknown'}\n"
-            f"This may indicate network connectivity issues or incorrect credentials."
+            f"Host: {settings.host if 'settings' in locals() else 'unknown'}"
         )
         return None
 
@@ -70,42 +71,44 @@ def flush_langfuse():
             logger.error(f"Failed to flush Langfuse data: {type(e).__name__}: {e}")
 
 
-def check_langfuse_connectivity():
+def check_langfuse_connectivity_async():
     """
-    检查 Langfuse 连接性（用于启动时诊断）
+    异步检查 Langfuse 连接性（后台运行，不阻塞启动）
     
-    在应用启动时调用，验证网络连接和凭证是否正常
+    在后台线程中验证网络连接，记录诊断信息但不影响服务启动
     """
-    client = _get_langfuse()
-    if client is None:
-        logger.warning("Langfuse connectivity check skipped: client not initialized")
-        return False
+    import threading
     
-    try:
-        settings = _get_langfuse_settings()
-        logger.info(f"Testing Langfuse connectivity to {settings.host}...")
+    def _check():
+        import time
+        time.sleep(2)  # 等待服务完全启动
         
-        # 尝试发送一个测试 trace 并立即 flush
-        test_trace = client.trace(name="connectivity-test")
-        test_trace.update(output={"status": "connection_test"})
-        client.flush()
+        client = _get_langfuse()
+        if client is None:
+            logger.info("Langfuse connectivity check skipped: client not initialized")
+            return
         
-        logger.info("Langfuse connectivity check PASSED")
-        return True
-    except Exception as e:
-        logger.error(
-            f"Langfuse connectivity check FAILED: {type(e).__name__}: {e}\n"
-            f"Possible causes:\n"
-            f"  1. Network connectivity issue - cannot reach {settings.host}\n"
-            f"  2. Firewall/proxy blocking HTTPS traffic\n"
-            f"  3. Invalid credentials (public_key or secret_key)\n"
-            f"  4. DNS resolution problem\n"
-            f"Troubleshooting:\n"
-            f"  - Test connectivity: curl -I {settings.host}/api/public/health\n"
-            f"  - Check DNS: nslookup {settings.host.replace('https://', '').replace('http://', '')}\n"
-            f"  - Verify credentials in environment variables"
-        )
-        return False
+        try:
+            settings = _get_langfuse_settings()
+            logger.info(f"Background: Testing Langfuse connectivity to {settings.host}...")
+            
+            # 发送测试 trace
+            test_trace = client.trace(name="startup-connectivity-test")
+            test_trace.update(output={"status": "background_check", "timestamp": time.time()})
+            client.flush()
+            
+            logger.info("✓ Langfuse connectivity verified in background")
+        except Exception as e:
+            logger.warning(
+                f"Background Langfuse connectivity test failed: {type(e).__name__}: {e}\n"
+                f"Note: This may be due to high latency. If traces appear in Langfuse dashboard later, ignore this warning.\n"
+                f"If no traces appear, check:\n"
+                f"  - Network: curl -I {settings.host}/api/public/health\n"
+                f"  - DNS: nslookup {settings.host.replace('https://', '').replace('http://', '')}"
+            )
+    
+    thread = threading.Thread(target=_check, daemon=True)
+    thread.start()
 
 
 def observe(name: str = None, **kwargs) -> Callable[[F], F]:

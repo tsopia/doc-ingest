@@ -62,9 +62,9 @@ app.include_router(sse_router)
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时检查 Langfuse 连接"""
-    from app.utils.observability import check_langfuse_connectivity
-    check_langfuse_connectivity()
+    """应用启动时在后台检查 Langfuse 连接"""
+    from app.utils.observability import check_langfuse_connectivity_async
+    check_langfuse_connectivity_async()
 
 
 @app.on_event("shutdown")
