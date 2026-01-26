@@ -13,12 +13,54 @@ from loguru import logger
 
 F = TypeVar('F', bound=Callable[..., Any])
 
+# 缓存 Langfuse 初始化状态
+_langfuse_initialized = False
+
+
+def _get_langfuse_settings():
+    """获取 Langfuse 配置"""
+    from app.config import get_settings
+    return get_settings().langfuse
+
+
+def _init_langfuse() -> bool:
+    """
+    初始化 Langfuse SDK（仅执行一次）
+    
+    Returns:
+        bool: 是否成功初始化
+    """
+    global _langfuse_initialized
+    if _langfuse_initialized:
+        return True
+    
+    try:
+        settings = _get_langfuse_settings()
+        if not (settings.public_key and settings.secret_key):
+            return False
+        
+        from langfuse import Langfuse
+        
+        # 显式初始化 Langfuse 单例，使用项目配置的凭证
+        # 这会设置全局状态，后续的 observe 装饰器和 OpenAI wrapper 都会使用它
+        Langfuse(
+            public_key=settings.public_key,
+            secret_key=settings.secret_key,
+            host=settings.host,
+        )
+        
+        _langfuse_initialized = True
+        logger.info(f"Langfuse initialized: host={settings.host}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to initialize Langfuse: {e}")
+        return False
+
 
 def _langfuse_enabled() -> bool:
     """检查是否启用 Langfuse（根据密钥是否配置）"""
     try:
-        from app.config import get_settings
-        settings = get_settings().langfuse
+        settings = _get_langfuse_settings()
         enabled = bool(settings.public_key and settings.secret_key)
         if enabled:
             logger.debug("Langfuse observability enabled")
@@ -39,7 +81,7 @@ def observe(name: str = None, **kwargs) -> Callable[[F], F]:
     Returns:
         装饰器函数
     """
-    if _langfuse_enabled():
+    if _langfuse_enabled() and _init_langfuse():
         try:
             from langfuse import observe as lf_observe
         except ImportError:
@@ -117,7 +159,7 @@ def get_openai_client(**kwargs):
     Returns:
         OpenAI 客户端实例
     """
-    if _langfuse_enabled():
+    if _langfuse_enabled() and _init_langfuse():
         try:
             from langfuse.openai import OpenAI as LangfuseOpenAI
             logger.debug("Using Langfuse-wrapped OpenAI client")

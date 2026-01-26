@@ -86,3 +86,15 @@ app.include_router(api_router)
 # Import and include SSE routes
 from app.api.sse_routes import router as sse_router
 app.include_router(sse_router)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时刷新 Langfuse 数据"""
+    try:
+        from langfuse import Langfuse
+        langfuse = Langfuse()
+        langfuse.flush()
+        logger.info("Langfuse data flushed on shutdown")
+    except Exception as e:
+        logger.debug(f"Langfuse flush on shutdown skipped: {e}")
