@@ -60,6 +60,13 @@ from app.api.sse_routes import router as sse_router
 app.include_router(sse_router)
 
 
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时检查 Langfuse 连接"""
+    from app.utils.observability import check_langfuse_connectivity
+    check_langfuse_connectivity()
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭时刷新 Langfuse 数据"""
