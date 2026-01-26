@@ -6,15 +6,16 @@
 - 已配置：使用 Langfuse 包装的客户端 + 监控装饰器
 """
 
-from typing import Any, Callable, TypeVar
+import inspect
 from functools import wraps
+from typing import Any, Callable, TypeVar
 
 from loguru import logger
 
 F = TypeVar('F', bound=Callable[..., Any])
 
-# 缓存 Langfuse 初始化状态
-_langfuse_initialized = False
+# Langfuse 单例实例缓存
+_langfuse_client = None
 
 
 def _get_langfuse_settings():
@@ -23,51 +24,41 @@ def _get_langfuse_settings():
     return get_settings().langfuse
 
 
-def _init_langfuse() -> bool:
+def _get_langfuse():
     """
-    初始化 Langfuse SDK（仅执行一次）
+    获取 Langfuse 客户端单例
     
     Returns:
-        bool: 是否成功初始化
+        Langfuse 实例，未配置或初始化失败时返回 None
     """
-    global _langfuse_initialized
-    if _langfuse_initialized:
-        return True
+    global _langfuse_client
+    if _langfuse_client is not None:
+        return _langfuse_client
     
     try:
         settings = _get_langfuse_settings()
         if not (settings.public_key and settings.secret_key):
-            return False
+            return None
         
         from langfuse import Langfuse
         
-        # 显式初始化 Langfuse 单例，使用项目配置的凭证
-        # 这会设置全局状态，后续的 observe 装饰器和 OpenAI wrapper 都会使用它
-        Langfuse(
+        _langfuse_client = Langfuse(
             public_key=settings.public_key,
             secret_key=settings.secret_key,
             host=settings.host,
         )
-        
-        _langfuse_initialized = True
         logger.info(f"Langfuse initialized: host={settings.host}")
-        return True
+        return _langfuse_client
     except Exception as e:
         logger.warning(f"Failed to initialize Langfuse: {e}")
-        return False
+        return None
 
 
-def _langfuse_enabled() -> bool:
-    """检查是否启用 Langfuse（根据密钥是否配置）"""
-    try:
-        settings = _get_langfuse_settings()
-        enabled = bool(settings.public_key and settings.secret_key)
-        if enabled:
-            logger.debug("Langfuse observability enabled")
-        return enabled
-    except Exception as e:
-        logger.warning(f"Failed to check Langfuse settings: {e}")
-        return False
+def flush_langfuse():
+    """刷新 Langfuse 数据（用于 shutdown）"""
+    if _langfuse_client is not None:
+        _langfuse_client.flush()
+        logger.info("Langfuse data flushed")
 
 
 def observe(name: str = None, **kwargs) -> Callable[[F], F]:
@@ -81,72 +72,39 @@ def observe(name: str = None, **kwargs) -> Callable[[F], F]:
     Returns:
         装饰器函数
     """
-    if _langfuse_enabled() and _init_langfuse():
-        try:
-            from langfuse import observe as lf_observe
-        except ImportError:
-            logger.warning("Langfuse enabled but package not installed, using passthrough")
-            def passthrough(func: F) -> F:
-               return func
-            return passthrough
+    # 检查 Langfuse 是否可用
+    if _get_langfuse() is None:
+        return lambda func: func
+    
+    try:
+        from langfuse import observe as lf_observe
+    except ImportError:
+        logger.warning("Langfuse package not installed, using passthrough")
+        return lambda func: func
 
-        # 包装器以增加调试日志
-        def logging_wrapper(func):
-            logger.debug(f"Langfuse @observe wrapping: {func.__name__} (as_trace={kwargs.get('as_trace')}, name={name})")
-            decorated = lf_observe(name=name, **kwargs)(func)
+    def wrapper(func: F) -> F:
+        decorated = lf_observe(name=name, **kwargs)(func)
+        func_name = func.__name__
 
-            import inspect
+        if inspect.isasyncgenfunction(func):
+            @wraps(func)
+            async def async_gen_wrapper(*args, **kw):
+                async for item in decorated(*args, **kw):
+                    yield item
+            return async_gen_wrapper
 
-            # 1. 异步生成器包装器 (Async Generator)
-            if inspect.isasyncgenfunction(func):
-                 @wraps(func)
-                 async def async_gen_wrapper(*args, **kwargs):
-                     logger.debug(f"Langfuse executing ASYNC GENERATOR: {func.__name__}")
-                     try:
-                         # 必须使用 async for 来消费 decorated 返回的 async generator
-                         async for item in decorated(*args, **kwargs):
-                             yield item
-                         logger.debug(f"Langfuse execution ASYNC GENERATOR DONE: {func.__name__}")
-                     except Exception as e:
-                         logger.error(f"Langfuse execution ASYNC GENERATOR FAILED: {func.__name__} error={e}")
-                         raise e
-                 return async_gen_wrapper
+        if inspect.iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kw):
+                return await decorated(*args, **kw)
+            return async_wrapper
 
-            # 2. 普通异步函数包装器 (Coroutine)
-            elif inspect.iscoroutinefunction(func):
-                @wraps(func)
-                async def async_wrapper(*args, **kwargs):
-                    logger.debug(f"Langfuse executing ASYNC COROUTINE: {func.__name__}")
-                    try:
-                         result = await decorated(*args, **kwargs)
-                         logger.debug(f"Langfuse execution ASYNC COROUTINE DONE: {func.__name__}")
-                         return result
-                    except Exception as e:
-                         logger.error(f"Langfuse execution ASYNC COROUTINE FAILED: {func.__name__} error={e}")
-                         raise e
-                return async_wrapper
+        @wraps(func)
+        def sync_wrapper(*args, **kw):
+            return decorated(*args, **kw)
+        return sync_wrapper
 
-            # 3. 同步函数包装器 (Sync)
-            else:
-                @wraps(func)
-                def sync_wrapper(*args, **kwargs):
-                    logger.debug(f"Langfuse executing SYNC: {func.__name__}")
-                    try:
-                        result = decorated(*args, **kwargs)
-                        logger.debug(f"Langfuse execution SYNC DONE: {func.__name__}")
-                        return result
-                    except Exception as e:
-                        logger.error(f"Langfuse execution SYNC FAILED: {func.__name__} error={e}")
-                        raise e
-                return sync_wrapper
-
-        return logging_wrapper
-
-    # 未启用或导入失败：透传装饰器
-    def passthrough(func: F) -> F:
-        return func
-
-    return passthrough
+    return wrapper
 
 
 def get_openai_client(**kwargs):
@@ -159,15 +117,14 @@ def get_openai_client(**kwargs):
     Returns:
         OpenAI 客户端实例
     """
-    if _langfuse_enabled() and _init_langfuse():
+    if _get_langfuse() is not None:
         try:
             from langfuse.openai import OpenAI as LangfuseOpenAI
             logger.debug("Using Langfuse-wrapped OpenAI client")
             return LangfuseOpenAI(**kwargs)
         except ImportError:
-            logger.warning("Langfuse enabled but package not installed, using native OpenAI client")
+            logger.warning("Langfuse package not installed, using native OpenAI client")
 
-    # 未启用或导入失败：使用原生 OpenAI 客户端
     from openai import OpenAI
     logger.debug("Using native OpenAI client")
     return OpenAI(**kwargs)
