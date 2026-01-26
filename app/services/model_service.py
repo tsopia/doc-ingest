@@ -410,3 +410,96 @@ class ModelService:
         except Exception as e:
             logger.exception(f"Unexpected error during model processing: {e}")
             raise e
+
+    @observe()
+    def process_document_stream(
+        self,
+        markdown: str,
+        images: list[dict],
+    ):
+        """
+        流式处理文档（自动处理分块）
+
+        Args:
+            markdown: 文本内容
+            images: 图片列表
+
+        Yields:
+            str: 文本片段
+        """
+        import time
+        logger.debug("DEBUG: Entering process_document_stream generator")
+
+        if not self._client:
+            logger.debug("Model processing skipped: no client configured")
+            return
+
+        # Token 预估
+        token_start = time.monotonic()
+        estimated_tokens = len(markdown) // 3 + len(images) * 170
+        token_elapsed = time.monotonic() - token_start
+
+        if estimated_tokens > self._settings.max_input_tokens:
+            logger.warning(
+                f"Document might be too large: estimated {estimated_tokens} tokens"
+            )
+
+        logger.info(
+            "Model streaming START: estimated_tokens={} (text: {}, images: {}) token_estimation_ms={}",
+            estimated_tokens,
+            len(markdown) // 3,
+            len(images) * 170,
+            int(token_elapsed * 1000),
+        )
+
+        # 判断是否需要切分
+        if not need_chunking(markdown, images, self._settings.max_input_tokens):
+            yield from self._process_document_stream_single(markdown, images)
+            self._clear_images_base64(images)
+            return
+
+        # 分块处理
+        chunks = self._splitter.split(markdown)
+        logger.info(f"Split into {len(chunks)} chunks for streaming")
+
+        for i, chunk in enumerate(chunks):
+            # 筛选该 chunk 引用的图片
+            chunk_images = self._filter_chunk_images(chunk.text, images)
+
+            # 若不是第一块，可能需要加个换行符分隔
+            if i > 0:
+                yield "\n\n"
+
+            prompt = self._build_chunk_prompt(chunk)
+            yield from self._process_document_stream_single(prompt, chunk_images)
+
+            # 及时释放图片内存
+            self._clear_images_base64(chunk_images)
+            gc.collect()
+
+    @observe(name="_process_document_stream_single")
+    def _process_document_stream_single(
+        self, markdown: str, images: list[dict]
+    ):
+        """处理单个文档片段的流式调用"""
+        content = self._build_content(
+            markdown, images, self._settings.task_prompt
+        )
+
+        messages = []
+        if self._settings.system_prompt:
+            messages.append({"role": "system", "content": self._settings.system_prompt})
+        messages.append({"role": "user", "content": content})
+
+        try:
+             # 使用重试机制包裹流式生成器？
+             # 注意：Retry 包裹 generator 比较复杂，一旦开始 yield 就很难 retry。
+             # 简单的策略：对连接建立进行 retry，一旦开始传输就不 retry 了。
+             # _call_model_stream 内部主要是 client.chat.completions.create 调用。
+
+             # 这里暂不加复杂 retry，直接调用
+             yield from self._call_model_stream(messages)
+
+        except Exception as e:
+            logger.error(f"Stream processing error: {e}")
+            raise e

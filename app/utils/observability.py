@@ -42,9 +42,63 @@ def observe(name: str = None, **kwargs) -> Callable[[F], F]:
     if _langfuse_enabled():
         try:
             from langfuse import observe as lf_observe
-            return lf_observe(name=name, **kwargs)
         except ImportError:
             logger.warning("Langfuse enabled but package not installed, using passthrough")
+            def passthrough(func: F) -> F:
+               return func
+            return passthrough
+
+        # 包装器以增加调试日志
+        def logging_wrapper(func):
+            logger.debug(f"Langfuse @observe wrapping: {func.__name__} (as_trace={kwargs.get('as_trace')}, name={name})")
+            decorated = lf_observe(name=name, **kwargs)(func)
+
+            import inspect
+
+            # 1. 异步生成器包装器 (Async Generator)
+            if inspect.isasyncgenfunction(func):
+                 @wraps(func)
+                 async def async_gen_wrapper(*args, **kwargs):
+                     logger.debug(f"Langfuse executing ASYNC GENERATOR: {func.__name__}")
+                     try:
+                         # 必须使用 async for 来消费 decorated 返回的 async generator
+                         async for item in decorated(*args, **kwargs):
+                             yield item
+                         logger.debug(f"Langfuse execution ASYNC GENERATOR DONE: {func.__name__}")
+                     except Exception as e:
+                         logger.error(f"Langfuse execution ASYNC GENERATOR FAILED: {func.__name__} error={e}")
+                         raise e
+                 return async_gen_wrapper
+
+            # 2. 普通异步函数包装器 (Coroutine)
+            elif inspect.iscoroutinefunction(func):
+                @wraps(func)
+                async def async_wrapper(*args, **kwargs):
+                    logger.debug(f"Langfuse executing ASYNC COROUTINE: {func.__name__}")
+                    try:
+                         result = await decorated(*args, **kwargs)
+                         logger.debug(f"Langfuse execution ASYNC COROUTINE DONE: {func.__name__}")
+                         return result
+                    except Exception as e:
+                         logger.error(f"Langfuse execution ASYNC COROUTINE FAILED: {func.__name__} error={e}")
+                         raise e
+                return async_wrapper
+
+            # 3. 同步函数包装器 (Sync)
+            else:
+                @wraps(func)
+                def sync_wrapper(*args, **kwargs):
+                    logger.debug(f"Langfuse executing SYNC: {func.__name__}")
+                    try:
+                        result = decorated(*args, **kwargs)
+                        logger.debug(f"Langfuse execution SYNC DONE: {func.__name__}")
+                        return result
+                    except Exception as e:
+                        logger.error(f"Langfuse execution SYNC FAILED: {func.__name__} error={e}")
+                        raise e
+                return sync_wrapper
+
+        return logging_wrapper
 
     # 未启用或导入失败：透传装饰器
     def passthrough(func: F) -> F:

@@ -52,282 +52,237 @@ class ParserService:
         """检查是否配置了模型"""
         return bool(get_settings().model.api_key)
 
-    def _clear_images_base64(self, images: list[dict]) -> None:
-        """清理图片的 base64 数据"""
-        for img in images:
-            if "base64" in img:
-                del img["base64"]
+    @observe()
+    async def process_workflow(
+        self,
+        source: str | object,  # URL str or UploadFile object
+        source_type: str = "url",  # "url" or "file"
+        enable_streaming: bool = False,
+    ):
+        """
+        统一的文档处理工作流（Async Generator）
 
-    @observe(name="parse_url")
+        Args:
+            source: URL 字符串 或 UploadFile 对象
+            source_type: "url" 或 "file"
+            enable_streaming: 是否启用模型流式输出
+
+        Yields:
+            dict: 事件字典，包含 type, stage, message, progress, data, content 等字段
+        """
+        import asyncio
+        import time
+
+        # 进度区间定义
+        P_START = 0
+        P_DOWNLOAD = 10
+        P_CONVERT = 15
+        P_EXTRACT = 25
+        P_UPLOAD = 35
+        P_MODEL_START = 35
+        P_MODEL_END = 95
+        P_DONE = 100
+
+        # 上下文数据
+        markdown = ""
+        images = []
+        filename = "unknown"
+
+        tmp_file_path = None
+
+        try:
+            # === Stage 1: 准备/下载 ===
+            yield {"type": "stage_start", "stage": "preparation", "message": "准备资源", "progress": P_START}
+
+            # 使用临时文件
+            fd, tmp_file_path = tempfile.mkstemp()
+            os.close(fd)
+
+            stream_info = None
+
+            if source_type == "url":
+                yield {"type": "progress", "message": "正在下载文档", "progress": P_START + 5}
+
+                def _download():
+                    with fetch(source) as response:
+                        response.raise_for_status()
+                        with open(tmp_file_path, "wb") as f:
+                            shutil.copyfileobj(response.raw, f)
+                        return stream_info_from_url(source, response.headers)
+
+                stream_info = await asyncio.to_thread(_download)
+                yield {"type": "stage_end", "stage": "preparation", "progress": P_DOWNLOAD}
+
+            elif source_type == "file":
+                yield {"type": "progress", "message": "正在读取文件", "progress": P_START + 5}
+                # source is UploadFile
+                filename = source.filename
+                content_type = source.content_type
+
+                def _save_upload():
+                    source.file.seek(0)
+                    with open(tmp_file_path, "wb") as f:
+                        shutil.copyfileobj(source.file, f)
+                    return StreamInfo(
+                        filename=filename,
+                        extension=os.path.splitext(filename)[1] or None,
+                        mimetype=content_type
+                    )
+
+                stream_info = await asyncio.to_thread(_save_upload)
+                yield {"type": "stage_end", "stage": "preparation", "progress": P_DOWNLOAD}
+
+            if not stream_info:
+                 raise ParserServiceError("Failed to determine stream info")
+
+            # === Stage 2: 转换 ===
+            yield {"type": "stage_start", "stage": "converting", "message": "文档转换中", "progress": P_DOWNLOAD}
+
+            def _convert():
+                with open(tmp_file_path, "rb") as f_read:
+                    result = self._md.convert_stream(
+                        f_read,
+                        stream_info=stream_info,
+                        keep_data_uris=True
+                    )
+                return normalize_markdown(result.text_content or "")
+
+            markdown = await asyncio.to_thread(_convert)
+            yield {"type": "stage_end", "stage": "converting", "progress": P_CONVERT}
+
+            # === Stage 3: 提取图片 ===
+            yield {"type": "stage_start", "stage": "extracting", "message": "提取图片", "progress": P_CONVERT}
+
+            def _extract():
+                md, imgs = extract_images_from_markdown(markdown)
+                # Fallback check
+                if not imgs and is_image_stream(stream_info):
+                    with open(tmp_file_path, "rb") as f_read:
+                        img_bytes = f_read.read()
+                    md, imgs = append_image_from_bytes(md, img_bytes, stream_info)
+                return md, imgs
+
+            markdown, images = await asyncio.to_thread(_extract)
+            yield {"type": "stage_end", "stage": "extracting", "data": {"image_count": len(images)}, "progress": P_EXTRACT}
+
+            # === Stage 4: 上传图片 ===
+            if images and storage_enabled():
+                yield {"type": "stage_start", "stage": "uploading", "message": f"上传图片 ({len(images)}张)", "progress": P_EXTRACT}
+                # storage upload is IO bound but implemented with threads in storage_client, acceptable to run in executor
+                await asyncio.to_thread(upload_images_concurrently, images)
+                yield {"type": "stage_end", "stage": "uploading", "progress": P_UPLOAD}
+
+            # === Stage 5: 模型处理 ===
+            # 如果无图片，也可能有纯文本处理需求？
+            # 保持原有逻辑：无图片且有模型 -> 跳过，除非 forced (当前逻辑是跳过)
+            # 有模型且有图片 -> 处理
+
+            has_model = self._has_model()
+            final_markdown = markdown
+
+            if has_model and images:
+                yield {"type": "stage_start", "stage": "model_processing", "message": "AI 分析中", "progress": P_MODEL_START}
+
+                if enable_streaming:
+                    # 流式处理
+                    from starlette.concurrency import iterate_in_threadpool
+
+                    full_content = ""
+                    async for chunk in iterate_in_threadpool(self._model_service.process_document_stream(markdown, images)):
+                         full_content += chunk
+                         yield {"type": "model_chunk", "content": chunk}
+                    final_markdown = full_content
+                else:
+                    # 阻塞处理
+                    def _call_model():
+                         return self._model_service.process_document_chunked(markdown, images)
+
+                    result = await asyncio.to_thread(_call_model)
+                    if result:
+                        final_markdown = result
+
+                # 清理 base64
+                for img in images:
+                    if "base64" in img:
+                         del img["base64"]
+
+                yield {"type": "stage_end", "stage": "model_processing", "progress": P_MODEL_END}
+
+            elif not images:
+                # No images log
+                logger.info("process_workflow: no images found, skipping model")
+
+            # === Result ===
+            result_data = {
+                "markdown": final_markdown,
+                # 如果没有模型处理（或模型保留了图片），可能需要返回 images 列表给前端
+                # 原逻辑：有模型 -> 只返回 markdown; 无模型 -> markdown + images
+                # 这里我们返回所有信息，由 controller 决定怎么给
+            }
+            if not has_model or not images:
+                 result_data["images"] = images
+
+            yield {"type": "result", "data": result_data, "progress": P_DONE}
+
+        except Exception as e:
+            logger.exception("process_workflow failed")
+            yield {"type": "error", "message": str(e)}
+            raise e
+        finally:
+            if tmp_file_path and os.path.exists(tmp_file_path):
+                try:
+                    os.unlink(tmp_file_path)
+                except OSError:
+                    pass
+            gc.collect()
+
     def parse_url(self, *, url: str) -> dict:
         """
-        解析 URL 并返回处理后的文档
-
-        Args:
-            url: 要解析的 URL
-
-        Returns:
-            处理后的数据字典
+        同步兼容接口：解析 URL
         """
-        overall_start = time.monotonic()
+        import asyncio
 
-        with tempfile.NamedTemporaryFile(delete=True) as tmp_file:
-            try:
-                logger.info("parse_url: START url={}", url)
+        async def _run():
+            result = None
+            async for event in self.process_workflow(url, "url", enable_streaming=False):
+                if event["type"] == "result":
+                    result = event["data"]
+                elif event["type"] == "error":
+                     raise ParserServiceError(event["message"])
+            return result
 
-                # 1. 下载文件
-                download_start = time.monotonic()
-                with fetch(url) as response:
-                    response.raise_for_status()
-                    stream_info = stream_info_from_url(url, response.headers)
-                    logger.debug(
-                        "parse_url: stream_info filename={} extension={} mimetype={}",
-                        stream_info.filename,
-                        stream_info.extension,
-                        stream_info.mimetype,
-                    )
+        try:
+            # 运行异步循环
+            # 注意：如果已经在 loop 中（例如 fastAPI 线程池调用），这里创建新 loop 可能会有问题
+            # 但 routes.py 是用 await asyncio.to_thread(_service.parse_url) 调用的
+            # to_thread 会在独立线程运行，那里没有 loop。所以 asyncio.run 是安全的。
+            return asyncio.run(_run())
+        except Exception as e:
+            if isinstance(e, ParserServiceError):
+                raise e
+            raise ParserServiceError(str(e))
 
-                    shutil.copyfileobj(response.raw, tmp_file)
-                    tmp_file.flush()
-                    tmp_file.seek(0)
-
-                logger.info(
-                    "parse_url: download done elapsed_ms={}",
-                    int((time.monotonic() - download_start) * 1000),
-                )
-
-                # 2. 转换文档
-                convert_start = time.monotonic()
-                with open(tmp_file.name, "rb") as f_read:
-                    result = self._md.convert_stream(
-                        f_read,
-                        stream_info=stream_info,
-                        keep_data_uris=True,  # 总是保留 data URI 以便提取
-                    )
-                markdown = normalize_markdown(result.text_content or "")
-                del result  # 释放 MarkItDown 结果对象
-
-                logger.info(
-                    "parse_url: convert done elapsed_ms={}",
-                    int((time.monotonic() - convert_start) * 1000),
-                )
-
-                # 3. 提取图片（总是执行）
-                extract_start = time.monotonic()
-                markdown, images = extract_images_from_markdown(markdown)
-
-                # Fallback: 输入本身是图片但未能提取
-                if not images and is_image_stream(stream_info):
-                    with open(tmp_file.name, "rb") as f_read:
-                        image_bytes = f_read.read()
-                    markdown, images = append_image_from_bytes(
-                        markdown, image_bytes, stream_info
-                    )
-                    logger.debug("parse_url: fallback image used, images={}", len(images))
-
-                logger.info(
-                    "parse_url: extract done images={} elapsed_ms={}",
-                    len(images),
-                    int((time.monotonic() - extract_start) * 1000),
-                )
-
-                # 4. 上传到 OSS（如果启用）
-                if images and storage_enabled():
-                    upload_start = time.monotonic()
-                    try:
-                        upload_images_concurrently(images)
-                        # 注意：upload_images_concurrently 内部会在成功时 pop base64
-                        # 失败的图片会保留 base64 作为 fallback
-                        logger.info(
-                            "parse_url: upload done images={} elapsed_ms={}",
-                            len(images),
-                            int((time.monotonic() - upload_start) * 1000),
-                        )
-                    except Exception as e:
-                        logger.error("parse_url: storage upload failed: {}", e)
-                        # 继续处理，不中断流程
-
-                # 5. 模型处理
-                # 如果没有图片，直接跳过模型处理（节省成本/时间），除非需要模型做纯文本清洗
-                # 根据需求：没图片就直接返回结果
-                if not images:
-                    logger.info("parse_url: no images found, skipping model processing")
-                    data = {"markdown": markdown}
-                elif self._has_model():
-                    model_start = time.monotonic()
-                    try:
-                        model_result = self._model_service.process_document_chunked(
-                            markdown, images
-                        )
-                        if model_result:
-                            markdown = model_result
-                            logger.info(
-                                "parse_url: model done length={} elapsed_ms={}",
-                                len(model_result),
-                                int((time.monotonic() - model_start) * 1000),
-                            )
-                    except Exception as e:
-                        logger.error("parse_url: model processing failed: {}", e)
-                        # 模型失败时回退到原始 markdown + images
-                        self._build_fallback_response(markdown, images)
-                    finally:
-                        # 模型处理完成后清理所有图片的 base64
-                        self._clear_images_base64(images)
-
-                    # 有模型时，只返回 markdown
-                    data = {"markdown": markdown}
-                else:
-                    # 无模型时，返回 markdown + images
-                    data = {"markdown": markdown, "images": images}
-
-                overall_elapsed = time.monotonic() - overall_start
-                logger.info(
-                    "parse_url: COMPLETE elapsed_ms={} chars={} images={}",
-                    int(overall_elapsed * 1000),
-                    len(markdown),
-                    len(images),
-                )
-
-                gc.collect()
-                return data
-
-            except requests.RequestException as exc:
-                logger.exception("parse_url: download failed")
-                raise ParserServiceError(f"download failed: {exc}") from exc
-            except (UnsupportedFormatException, FileConversionException, MarkItDownException) as exc:
-                logger.exception("parse_url: conversion failed")
-                raise ParserServiceError(f"conversion failed: {exc}") from exc
-            except Exception as exc:
-                logger.exception("parse_url: unknown error")
-                raise ParserServiceError(f"unknown error: {exc}") from exc
-            finally:
-                gc.collect()
-
-    @observe(name="parse_file")
     def parse_file(self, *, file) -> dict:
         """
-        解析上传的文件并返回处理后的文档
-
-        Args:
-            file: 上传的文件对象
-
-        Returns:
-            处理后的数据字典
+        同步兼容接口：解析文件
         """
-        overall_start = time.monotonic()
+        import asyncio
 
-        with tempfile.NamedTemporaryFile(delete=True) as tmp_file:
-            try:
-                logger.info(
-                    "parse_file: START filename={} content_type={}",
-                    file.filename,
-                    file.content_type,
-                )
+        async def _run():
+            result = None
+            async for event in self.process_workflow(file, "file", enable_streaming=False):
+                if event["type"] == "result":
+                    result = event["data"]
+                elif event["type"] == "error":
+                     raise ParserServiceError(event["message"])
+            return result
 
-                # 1. 复制文件到临时目录
-                file.file.seek(0)
-                shutil.copyfileobj(file.file, tmp_file)
-                tmp_file.flush()
-                tmp_file.seek(0)
-
-                # 2. 转换文档
-                convert_start = time.monotonic()
-                stream_info = StreamInfo(
-                    filename=file.filename,
-                    extension=os.path.splitext(file.filename)[1] or None,
-                    mimetype=file.content_type,
-                )
-
-                with open(tmp_file.name, "rb") as f_read:
-                    result = self._md.convert_stream(
-                        f_read,
-                        stream_info=stream_info,
-                        keep_data_uris=True,
-                    )
-                markdown = normalize_markdown(result.text_content or "")
-                del result
-
-                logger.info(
-                    "parse_file: convert done elapsed_ms={}",
-                    int((time.monotonic() - convert_start) * 1000),
-                )
-
-                # 3. 提取图片
-                extract_start = time.monotonic()
-                markdown, images = extract_images_from_markdown(markdown)
-
-                if not images and is_image_stream(stream_info):
-                    with open(tmp_file.name, "rb") as f_read:
-                        image_bytes = f_read.read()
-                    markdown, images = append_image_from_bytes(
-                        markdown, image_bytes, stream_info
-                    )
-                    logger.debug("parse_file: fallback image used, images={}", len(images))
-
-                logger.info(
-                    "parse_file: extract done images={} elapsed_ms={}",
-                    len(images),
-                    int((time.monotonic() - extract_start) * 1000),
-                )
-
-                # 4. 上传到 OSS
-                if images and storage_enabled():
-                    upload_start = time.monotonic()
-                    try:
-                        upload_images_concurrently(images)
-                        logger.info(
-                            "parse_file: upload done images={} elapsed_ms={}",
-                            len(images),
-                            int((time.monotonic() - upload_start) * 1000),
-                        )
-                    except Exception as e:
-                        logger.error("parse_file: storage upload failed: {}", e)
-
-                # 5. 模型处理
-                if not images:
-                    logger.info("parse_file: no images found, skipping model processing")
-                    data = {"markdown": markdown}
-                elif self._has_model():
-                    model_start = time.monotonic()
-                    try:
-                        model_result = self._model_service.process_document_chunked(
-                            markdown, images
-                        )
-                        if model_result:
-                            markdown = model_result
-                            logger.info(
-                                "parse_file: model done length={} elapsed_ms={}",
-                                len(model_result),
-                                int((time.monotonic() - model_start) * 1000),
-                            )
-                    except Exception as e:
-                        logger.error("parse_file: model processing failed: {}", e)
-                    finally:
-                        self._clear_images_base64(images)
-
-                    data = {"markdown": markdown}
-                else:
-                    data = {"markdown": markdown, "images": images}
-
-                overall_elapsed = time.monotonic() - overall_start
-                logger.info(
-                    "parse_file: COMPLETE elapsed_ms={} chars={} images={}",
-                    int(overall_elapsed * 1000),
-                    len(markdown),
-                    len(images),
-                )
-
-                gc.collect()
-                return data
-
-            except (UnsupportedFormatException, FileConversionException, MarkItDownException) as exc:
-                logger.exception("parse_file: conversion failed")
-                raise ParserServiceError(f"conversion failed: {exc}") from exc
-            except Exception as exc:
-                logger.exception("parse_file: unknown error")
-                raise ParserServiceError(f"unknown error: {exc}") from exc
-            finally:
-                gc.collect()
+        try:
+            return asyncio.run(_run())
+        except Exception as e:
+             if isinstance(e, ParserServiceError):
+                raise e
+             raise ParserServiceError(str(e))
 
     def _build_fallback_response(self, markdown: str, images: list[dict]) -> dict:
         """构建回退响应（模型失败时使用）"""
