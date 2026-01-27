@@ -58,6 +58,7 @@ class ParserService:
         source: str | object,  # URL str or UploadFile object
         source_type: str = "url",  # "url" or "file"
         enable_streaming: bool = False,
+        accumulate_model_output: bool = True,
     ):
         """
         统一的文档处理工作流（Async Generator）
@@ -66,6 +67,7 @@ class ParserService:
             source: URL 字符串 或 UploadFile 对象
             source_type: "url" 或 "file"
             enable_streaming: 是否启用模型流式输出
+            accumulate_model_output: 是否在服务端拼接模型输出（仅在 enable_streaming=True 时有效）
 
         Yields:
             dict: 事件字典，包含 type, stage, message, progress, data, content 等字段
@@ -189,9 +191,14 @@ class ParserService:
 
                     full_content = ""
                     async for chunk in iterate_in_threadpool(self._model_service.process_document_stream(markdown, images)):
-                         full_content += chunk
+                         if accumulate_model_output:
+                            full_content += chunk
                          yield {"type": "model_chunk", "content": chunk}
-                    final_markdown = full_content
+
+                    if accumulate_model_output:
+                        final_markdown = full_content
+                    else:
+                        final_markdown = ""
                 else:
                     # 阻塞处理
                     def _call_model():
@@ -222,7 +229,10 @@ class ParserService:
             if not has_model or not images:
                  result_data["images"] = images
 
-            yield {"type": "result", "data": result_data, "progress": P_DONE}
+            # 仅当我们需要发送完整结果时才 yield
+            # 如果是流式模式且禁用了累积，则不发送空的 result (model_chunk)
+            if not (enable_streaming and has_model and images and not accumulate_model_output):
+                yield {"type": "result", "data": result_data, "progress": P_DONE}
 
         except Exception as e:
             logger.exception("process_workflow failed")

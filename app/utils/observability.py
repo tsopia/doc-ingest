@@ -27,22 +27,22 @@ def _get_langfuse_settings():
 def _get_langfuse():
     """
     获取 Langfuse 客户端单例
-    
+
     Returns:
         Langfuse 实例，未配置或初始化失败时返回 None
     """
     global _langfuse_client
     if _langfuse_client is not None:
         return _langfuse_client
-    
+
     try:
         settings = _get_langfuse_settings()
         if not (settings.public_key and settings.secret_key):
             logger.debug("Langfuse disabled: credentials not configured")
             return None
-        
+
         from langfuse import Langfuse
-        
+
         logger.info(f"Initializing Langfuse client: host={settings.host}")
         _langfuse_client = Langfuse(
             public_key=settings.public_key,
@@ -74,29 +74,29 @@ def flush_langfuse():
 def check_langfuse_connectivity_async():
     """
     异步检查 Langfuse 连接性（后台运行，不阻塞启动）
-    
+
     在后台线程中验证网络连接，记录诊断信息但不影响服务启动
     """
     import threading
-    
+
     def _check():
         import time
         time.sleep(2)  # 等待服务完全启动
-        
+
         client = _get_langfuse()
         if client is None:
             logger.info("Langfuse connectivity check skipped: client not initialized")
             return
-        
+
         try:
             settings = _get_langfuse_settings()
             logger.info(f"Background: Testing Langfuse connectivity to {settings.host}...")
-            
+
             # 发送测试 trace
             test_trace = client.trace(name="startup-connectivity-test")
             test_trace.update(output={"status": "background_check", "timestamp": time.time()})
             client.flush()
-            
+
             logger.info("✓ Langfuse connectivity verified in background")
         except Exception as e:
             logger.warning(
@@ -106,7 +106,7 @@ def check_langfuse_connectivity_async():
                 f"  - Network: curl -I {settings.host}/api/public/health\n"
                 f"  - DNS: nslookup {settings.host.replace('https://', '').replace('http://', '')}"
             )
-    
+
     thread = threading.Thread(target=_check, daemon=True)
     thread.start()
 
@@ -125,7 +125,7 @@ def observe(name: str = None, **kwargs) -> Callable[[F], F]:
     # 检查 Langfuse 是否可用
     if _get_langfuse() is None:
         return lambda func: func
-    
+
     try:
         from langfuse import observe as lf_observe
     except ImportError:

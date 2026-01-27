@@ -3,7 +3,7 @@
 import asyncio
 import gc
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
@@ -19,10 +19,14 @@ _service = ParserService()
 
 class UrlStreamRequest(BaseModel):
     url: str
+    include_result: bool = False
 
 
 @router.post("/convert/file/stream")
-async def convert_file_stream(file: UploadFile = File(...)) -> StreamingResponse:
+async def convert_file_stream(
+    file: UploadFile = File(...),
+    include_result: bool = Form(False)
+) -> StreamingResponse:
     """SSE 流式文件转换接口"""
     trace_id = get_trace_id() or generate_trace_id()
 
@@ -36,7 +40,10 @@ async def convert_file_stream(file: UploadFile = File(...)) -> StreamingResponse
             logger.info("SSE processing file START: filename={} trace_id={}", file.filename, trace_id)
 
             async for event in _service.process_workflow(
-                file, "file", enable_streaming=True
+                file,
+                "file",
+                enable_streaming=True,
+                accumulate_model_output=include_result
             ):
                 yield _map_event(gen, event)
 
@@ -56,6 +63,8 @@ async def convert_file_stream(file: UploadFile = File(...)) -> StreamingResponse
     )
 
 
+
+
 @router.post("/convert/url/stream")
 async def convert_url_stream(payload: UrlStreamRequest) -> StreamingResponse:
     """SSE 流式 URL 转换接口"""
@@ -69,7 +78,10 @@ async def convert_url_stream(payload: UrlStreamRequest) -> StreamingResponse:
             logger.info("SSE processing url START: url={} trace_id={}", payload.url, trace_id)
 
             async for event in _service.process_workflow(
-                payload.url, "url", enable_streaming=True
+                payload.url,
+                "url",
+                enable_streaming=True,
+                accumulate_model_output=payload.include_result
             ):
                 yield _map_event(gen, event)
 

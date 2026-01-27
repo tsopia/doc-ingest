@@ -81,24 +81,87 @@ curl http://localhost:8000/health
 
 ### 1. 同步接口 (Standard API)
 
-适用于不需要实时反馈的场景（如后台批处理）。
+适用于不需要实时反馈的场景（如后台批处理）。支持**同步等待**和**异步回调**两种模式。
+
+#### 1.1 文件转换
 
 **POST** `/convert/file`
 
+| 参数 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `file` | File | 是 | 上传的文件 |
+| `callback_url` | string | 否 | 回调地址。若提供，接口立即返回 `task_id`，处理完成后向该地址发送 POST 请求。 |
+
 ```bash
+# 模式 A: 同步等待 (默认)
 curl -X POST "http://localhost:8000/convert/file" \
   -F "file=@/path/to/doc.pdf"
+
+# 模式 B: 异步回调
+curl -X POST "http://localhost:8000/convert/file" \
+  -F "file=@/path/to/doc.pdf" \
+  -F "callback_url=http://your-server.com/webhook"
+# 响应: {"code": 0, "msg": "Task accepted", "data": {"trace_id": "..."}}
+```
+
+#### 1.2 URL 转换
+
+**POST** `/convert/url`
+
+| 参数 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `url` | string | 是 | 文档 URL |
+| `callback_url` | string | 否 | 回调地址 |
+
+```bash
+# 模式 A: 同步等待
+curl -X POST "http://localhost:8000/convert/url" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/doc.pdf"}'
+
+# 模式 B: 异步回调
+curl -X POST "http://localhost:8000/convert/url" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "...", "callback_url": "..."}'
 ```
 
 ### 2. 流式接口 (Streaming/SSE API) 🔥
 
 **推荐使用**。适用于 Web 应用，提供实时进度和模型输出的"打字机"效果，彻底解决大文件超时问题。
 
+#### 2.1 文件流式转换
+
 **POST** `/convert/file/stream`
 
+| 参数 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `file` | File | 是 | 上传的文件 |
+| `include_result` | bool | 否 | 是否在流结束时计算并返回完整 markdown 结果 (默认 `false`)。开启会增加服务端内存消耗。 |
+
 ```bash
+# 默认模式 (省流/省内存)
 curl -N -X POST "http://localhost:8000/convert/file/stream" \
-  -F "file=@/path/to/large_doc.pdf"
+  -F "file=@/path/to/doc.pdf"
+
+# 开启结果汇总 (调试用)
+curl -N -X POST "http://localhost:8000/convert/file/stream" \
+  -F "file=@/path/to/doc.pdf" \
+  -F "include_result=true"
+```
+
+#### 2.2 URL 流式转换
+
+**POST** `/convert/url/stream`
+
+| 参数 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `url` | string | 是 | 文档 URL |
+| `include_result` | bool | 否 | 是否在流结束时计算并返回完整 markdown 结果 (默认 `false`) |
+
+```bash
+curl -N -X POST "http://localhost:8000/convert/url/stream" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/doc.pdf", "include_result": false}'
 ```
 
 **响应格式 (Server-Sent Events)**:
