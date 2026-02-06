@@ -1,7 +1,7 @@
 # ==========================================
 # 阶段 1: 构建阶段 (构建虚拟环境)
 # ==========================================
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
+FROM registry.cn-hangzhou.aliyuncs.com/synocodes-qa/uv:python3.11-bookworm-slim AS builder
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ==========================================
 # 阶段 2: 生产环境 (精简 Runtime)
 # ==========================================
-FROM python:3.11-slim-bookworm
+FROM registry.cn-hangzhou.aliyuncs.com/synocodes-qa/python:3.11-slim-bookworm
 
 WORKDIR /app
 
