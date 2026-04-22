@@ -10,7 +10,6 @@ dependencies = [
     "pydantic>=2.10.5",
     "pydantic-settings>=2.7.1",
     "loguru>=0.7.3",
-    "markitdown[all]>=0.0.1a2",
     "openai>=1.59.7",
     "requests>=2.32.3",
     "minio>=7.2.12",
@@ -19,6 +18,7 @@ dependencies = [
     "python-multipart>=0.0.21",
     "tenacity>=9.0.0",
     "langfuse>=2.0.0",
+    "markitdown[all]>=0.1.5",
 ]
 
 [build-system]
