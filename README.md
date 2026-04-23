@@ -9,7 +9,7 @@
 - **实时流式响应**：支持 SSE（Server-Sent Events）流式输出，大文件处理不超时，提供"打字机"体验
 - **全链路可观测**：自动生成 `x-trace-id`，支持请求链路追踪和性能分析
 - **智能重试**：内置模型调用重试机制，提升稳定性
-- **对象存储集成**：支持将提取的图片上传至 S3/OSS 兼容存储
+- **对象存储集成**：支持将提取的图片上传至 S3/OSS/MinIO/腾讯云 COS 等兼容存储
 
 ---
 
@@ -59,6 +59,9 @@ curl http://localhost:8000/health
 | `DOC_INGEST__MODEL__MODEL_NAME` | `gpt-4o` | 模型名称 (如 qwen-plus, deepseek-chat) |
 | `DOC_INGEST__MODEL__TIMEOUT_SECONDS` | `120` | 模型超时时间 |
 | `DOC_INGEST__MODEL__MAX_INPUT_TOKENS` | `25000` | 最大输入 Token 限制 |
+| `DOC_INGEST__MODEL__TEMPERATURE` | `0.1` | 模型温度 |
+| `DOC_INGEST__MODEL__MAX_RETRIES` | `3` | 模型调用最大重试次数 |
+| `DOC_INGEST__MODEL__DENOISE_PROMPT` | - | AI 去噪的 Prompt |
 
 ### SSE 流式配置
 | 环境变量 | 默认值 | 说明 |
@@ -66,14 +69,26 @@ curl http://localhost:8000/health
 | `DOC_INGEST__SSE__HEARTBEAT_INTERVAL` | `10` | 心跳间隔（秒） |
 | `DOC_INGEST__SSE__LONG_STAGE_THRESHOLD` | `10` | 触发心跳的阶段耗时阈值（秒） |
 
-### 对象存储 (OSS/S3)
+### 对象存储 (OSS/S3/MinIO/COS)
 | 环境变量 | 说明 |
 |---------|------|
-| `DOC_INGEST__OSS__ENDPOINT` | S3/OSS Endpoint 地址 |
-| `DOC_INGEST__OSS__ACCESS_KEY_ID` | Access Key ID |
-| `DOC_INGEST__OSS__ACCESS_KEY_SECRET` | Access Key Secret |
-| `DOC_INGEST__OSS__BUCKET` | 存储桶名称 |
-| `DOC_INGEST__OSS__URL_TTL_SECONDS` | 下载链接有效期（默认 1800s） |
+| `DOC_INGEST__STORAGE__PROVIDER` | 存储提供商: `oss`, `s3`, `minio`, `cos` (默认 `oss`) |
+| `DOC_INGEST__STORAGE__ENDPOINT` | 存储服务端点 |
+| `DOC_INGEST__STORAGE__ACCESS_KEY_ID` | Access Key ID |
+| `DOC_INGEST__STORAGE__ACCESS_KEY_SECRET` | Access Key Secret |
+| `DOC_INGEST__STORAGE__BUCKET` | 存储桶名称 |
+| `DOC_INGEST__STORAGE__REGION` | 区域（S3/COS需要） |
+| `DOC_INGEST__STORAGE__PREFIX` | 对象前缀 (默认 `doc-ingest/`) |
+| `DOC_INGEST__STORAGE__SECURE` | 是否使用HTTPS (默认 `true`) |
+| `DOC_INGEST__STORAGE__URL_TTL_SECONDS` | 下载链接有效期（默认 1800s） |
+
+### 可观测性 (Langfuse)
+可选配置，配置密钥后自动启用 Langfuse 链路追踪。
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `DOC_INGEST__LANGFUSE__PUBLIC_KEY` | - | Langfuse Public Key |
+| `DOC_INGEST__LANGFUSE__SECRET_KEY` | - | Langfuse Secret Key |
+| `DOC_INGEST__LANGFUSE__HOST` | `https://cloud.langfuse.com` | Langfuse Host URL |
 
 ---
 
@@ -91,6 +106,8 @@ curl http://localhost:8000/health
 |------|------|------|------|
 | `file` | File | 是 | 上传的文件 |
 | `callback_url` | string | 否 | 回调地址。若提供，接口立即返回 `task_id`，处理完成后向该地址发送 POST 请求。 |
+| `mode` | string | 否 | 处理模式: `ocr` 等 (默认 `ocr`) |
+| `enable_ai_denoise` | string | 否 | AI去噪开关: `auto`/`true`/`false` (默认 `auto`) |
 
 ```bash
 # 模式 A: 同步等待 (默认)
@@ -112,6 +129,8 @@ curl -X POST "http://localhost:8000/convert/file" \
 |------|------|------|------|
 | `url` | string | 是 | 文档 URL |
 | `callback_url` | string | 否 | 回调地址 |
+| `mode` | string | 否 | 处理模式: `ocr` 等 (默认 `ocr`) |
+| `enable_ai_denoise` | string | 否 | AI去噪开关: `auto`/`true`/`false` (默认 `auto`) |
 
 ```bash
 # 模式 A: 同步等待
@@ -137,6 +156,8 @@ curl -X POST "http://localhost:8000/convert/url" \
 |------|------|------|------|
 | `file` | File | 是 | 上传的文件 |
 | `include_result` | bool | 否 | 是否在流结束时计算并返回完整 markdown 结果 (默认 `false`)。开启会增加服务端内存消耗。 |
+| `mode` | string | 否 | 处理模式: `ocr` 等 (默认 `ocr`) |
+| `enable_ai_denoise` | string | 否 | AI去噪开关: `auto`/`true`/`false` (默认 `auto`) |
 
 ```bash
 # 默认模式 (省流/省内存)
@@ -157,6 +178,8 @@ curl -N -X POST "http://localhost:8000/convert/file/stream" \
 |------|------|------|------|
 | `url` | string | 是 | 文档 URL |
 | `include_result` | bool | 否 | 是否在流结束时计算并返回完整 markdown 结果 (默认 `false`) |
+| `mode` | string | 否 | 处理模式: `ocr` 等 (默认 `ocr`) |
+| `enable_ai_denoise` | string | 否 | AI去噪开关: `auto`/`true`/`false` (默认 `auto`) |
 
 ```bash
 curl -N -X POST "http://localhost:8000/convert/url/stream" \

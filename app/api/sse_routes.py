@@ -20,12 +20,16 @@ _service = ParserService()
 class UrlStreamRequest(BaseModel):
     url: str
     include_result: bool = False
+    mode: str = "ocr"
+    enable_ai_denoise: str = "auto"
 
 
 @router.post("/convert/file/stream")
 async def convert_file_stream(
     file: UploadFile = File(...),
-    include_result: bool = Form(False)
+    include_result: bool = Form(False),
+    mode: str = Form("ocr"),
+    enable_ai_denoise: str = Form("auto"),
 ) -> StreamingResponse:
     """SSE 流式文件转换接口"""
     trace_id = get_trace_id() or generate_trace_id()
@@ -42,6 +46,8 @@ async def convert_file_stream(
             async for event in _service.process_workflow(
                 file,
                 "file",
+                mode=mode,
+                enable_ai_denoise=enable_ai_denoise,
                 enable_streaming=True,
                 accumulate_model_output=include_result
             ):
@@ -80,6 +86,8 @@ async def convert_url_stream(payload: UrlStreamRequest) -> StreamingResponse:
             async for event in _service.process_workflow(
                 payload.url,
                 "url",
+                mode=payload.mode,
+                enable_ai_denoise=payload.enable_ai_denoise,
                 enable_streaming=True,
                 accumulate_model_output=payload.include_result
             ):

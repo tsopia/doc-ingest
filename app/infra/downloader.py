@@ -1,3 +1,4 @@
+import threading
 from typing import Optional
 
 import requests
@@ -5,13 +6,17 @@ import requests
 from app.config import get_settings
 
 _session: Optional[requests.Session] = None
+_session_lock = threading.Lock()
 
 
 def _get_session() -> requests.Session:
     global _session
-    if _session is None:
-        _session = requests.Session()
-    return _session
+    if _session is not None:
+        return _session
+    with _session_lock:
+        if _session is None:
+            _session = requests.Session()
+        return _session
 
 
 def fetch(

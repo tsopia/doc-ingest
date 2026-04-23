@@ -19,6 +19,8 @@ dependencies = [
     "tenacity>=9.0.0",
     "langfuse>=2.0.0",
     "markitdown[all]>=0.1.5",
+    "markitdown-ocr>=0.1.0",
+    "psutil>=7.2.2",
 ]
 
 [build-system]

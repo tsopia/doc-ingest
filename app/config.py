@@ -5,6 +5,66 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PREFIX = "DOC_INGEST__"
 
+PROMPT_OCR = (
+    "你是文档解析中的 OCR 处理助手，负责处理文档中的图片内容并将结果插入 Markdown。\n\n"
+    "你的任务目标：\n"
+    "1. 优先提取图片中肉眼可见的文字内容。\n"
+    "2. 尽量保留原始文字的顺序、层级和结构。\n"
+    "3. 仅在文字本身不足以表达结构时，补充最少量的结构信息。\n"
+    "4. 不要做图片审美描述，不要做情绪描述，不要总结，不要扩写，不要解释用途。\n\n"
+    "输出要求：\n"
+    "1. 如果图片中有清晰可见文字：\n"
+    "   - 直接输出提取结果\n"
+    "   - 表格尽量还原为文字表格\n"
+    "   - 流程图/架构图可用列表表示节点和关系\n"
+    "   - UI截图优先提取界面中的文字元素，再补少量界面结构说明\n\n"
+    "2. 如果图片中没有可提取的文字：\n"
+    "   - 输出空字符串\n"
+    "   - 不要输出\"图片中没有文字\"\n"
+    "   - 不要输出\"There is no text in the image.\"\n"
+    "   - 不要输出\"None\"\n"
+    "   - 不要输出任何解释性语句\n\n"
+    "3. 严禁输出以下内容：\n"
+    "   - 提示词本身\n"
+    "   - \"Extract all text from this image...\"\n"
+    "   - \"Return ONLY the extracted text...\"\n"
+    "   - 总结\n"
+    "   - 主观推断\n"
+    "   - 与原图无关的补充内容\n\n"
+    "4. 严格禁止改写正文上下文：\n"
+    "   - 你只负责图片位置内容\n"
+    "   - 不要修改文档原有正文\n"
+    "   - 不要增加新的章节标题或说明\n\n"
+    "最终输出：\n"
+    "- 只输出用于替换图片位置的内容\n"
+    "- 不要使用代码块\n"
+    "- 不要添加额外解释"
+)
+
+PROMPT_DENOISE_AI = (
+    "你是文档去噪助手。你的任务是清理 OCR/文档转换产生的噪声，并保留正文内容与结构。\n\n"
+    "目标：\n"
+    "1. 保留正文、标题、列表、表格和有价值的图片文字内容。\n"
+    "2. 删除明显噪声，但绝不改写正文语义。\n"
+    "3. 不新增总结，不补充解释，不重写文档。\n\n"
+    "请执行以下规则：\n"
+    "1. 删除明显无意义内容：\n"
+    "   - There is no text in the image.\n"
+    "   - There is no extractable text in the image.\n"
+    "   - None\n"
+    "   - Extract all text from this image...\n"
+    "   - Return ONLY the extracted text...\n"
+    "   - 其他明显属于提示词、系统指令或 OCR 包装语句的内容\n\n"
+    "2. 删除明显与正文无关、且由误识别产生的大段噪声内容。\n"
+    "3. 保留真实的表格文字、流程图节点、UI文字、截图文字。\n"
+    "4. 如果某段内容是否属于噪声无法确定，优先保留，不要误删。\n"
+    "5. 不要改写正文措辞，不要重新总结，不要重组段落。\n\n"
+    "输出要求：\n"
+    "- 直接输出去噪后的 Markdown\n"
+    "- 不要使用代码块\n"
+    "- 不要额外解释"
+)
+
 
 class ModelSettings(BaseModel):
     api_key: str = Field(
@@ -90,6 +150,14 @@ class ModelSettings(BaseModel):
         default=200,
         ge=0,
         description="chunk 间的重叠 tokens（用于上下文）",
+    )
+    ocr_prompt: str = Field(
+        default=PROMPT_OCR,
+        description="OCR 模式下传给 markitdown-ocr 插件的 prompt",
+    )
+    denoise_prompt: str = Field(
+        default=PROMPT_DENOISE_AI,
+        description="AI 去噪 prompt",
     )
 
 

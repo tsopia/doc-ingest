@@ -29,6 +29,8 @@ def health_check() -> dict:
 class UrlRequest(BaseModel):
     url: str
     callback_url: Optional[str] = None
+    mode: str = "ocr"
+    enable_ai_denoise: str = "auto"
 
 
 def _ok(data: dict) -> dict:
@@ -48,35 +50,42 @@ class DummyUploadFile:
         self.file = open(path, "rb")
 
     def close(self):
-        self.file.close()
+        if self.file and not self.file.closed:
+            self.file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False  # 不吞吸异常
 
 
-async def _background_process_url(url: str, callback_url: str, trace_id: str):
+async def _background_process_url(url: str, callback_url: str, trace_id: str, mode: str = "ocr", enable_ai_denoise: str = "auto"):
     """Background task for URL processing"""
     try:
         # Run blocking service method in thread pool
-        data = await asyncio.to_thread(_service.parse_url, url=url)
+        data = await asyncio.to_thread(_service.parse_url, url=url, mode=mode, enable_ai_denoise=enable_ai_denoise)
         await send_callback(callback_url, _ok(data), trace_id)
     except Exception as e:
         await send_callback(callback_url, _err(str(e)), trace_id)
 
 
-async def _background_process_file(temp_path: str, filename: str, content_type: str, callback_url: str, trace_id: str):
+async def _background_process_file(temp_path: str, filename: str, content_type: str, callback_url: str, trace_id: str, mode: str = "ocr", enable_ai_denoise: str = "auto"):
     """Background task for file processing"""
-    dummy_file = DummyUploadFile(temp_path, filename, content_type)
-    try:
-        # Run blocking service method in thread pool
-        data = await asyncio.to_thread(_service.parse_file, file=dummy_file)
-        await send_callback(callback_url, _ok(data), trace_id)
-    except Exception as e:
-        await send_callback(callback_url, _err(str(e)), trace_id)
-    finally:
-        dummy_file.close()
-        # Clean up temp file
+    with DummyUploadFile(temp_path, filename, content_type) as dummy_file:
         try:
-            os.unlink(temp_path)
-        except OSError:
-            pass
+            # Run blocking service method in thread pool
+            data = await asyncio.to_thread(_service.parse_file, file=dummy_file, mode=mode, enable_ai_denoise=enable_ai_denoise)
+            await send_callback(callback_url, _ok(data), trace_id)
+        except Exception as e:
+            await send_callback(callback_url, _err(str(e)), trace_id)
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 @router.post("/convert/url")
@@ -98,13 +107,15 @@ async def convert_url(
             _background_process_url,
             url,
             payload.callback_url,
-            trace_id
+            trace_id,
+            payload.mode,
+            payload.enable_ai_denoise,
         )
         return {"code": 0, "msg": "Task accepted", "data": {"trace_id": trace_id}}
 
     # Sync mode
     try:
-        data = await asyncio.to_thread(_service.parse_url, url=url)
+        data = await asyncio.to_thread(_service.parse_url, url=url, mode=payload.mode, enable_ai_denoise=payload.enable_ai_denoise)
         return _ok(data)
     except ParserServiceError as exc:
         return _err(str(exc))
@@ -114,6 +125,8 @@ async def convert_url(
 async def convert_file(
     file: UploadFile = File(...),
     callback_url: Optional[str] = Form(None),
+    mode: str = Form("ocr"),
+    enable_ai_denoise: str = Form("auto"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ) -> dict:
     if not file.filename:
@@ -146,14 +159,16 @@ async def convert_file(
             file.filename,
             file.content_type or "application/octet-stream",
             callback_url,
-            trace_id
+            trace_id,
+            mode,
+            enable_ai_denoise,
         )
         return {"code": 0, "msg": "Task accepted", "data": {"trace_id": trace_id}}
 
     # Sync mode
     try:
         # Note: ParserService is blocking, run in thread
-        data = await asyncio.to_thread(_service.parse_file, file=file)
+        data = await asyncio.to_thread(_service.parse_file, file=file, mode=mode, enable_ai_denoise=enable_ai_denoise)
         return _ok(data)
     except ParserServiceError as exc:
         return _err(str(exc))

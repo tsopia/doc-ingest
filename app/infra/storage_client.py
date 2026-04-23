@@ -203,19 +203,28 @@ def upload_images_concurrently(images: list[dict]) -> None:
             executor.submit(_upload_image, image, storage, _UPLOAD_RETRIES): image
             for image in images
         }
+        failed_count = 0
         for future in futures:
             try:
                 if future.result():
                     success_count += 1
+                else:
+                    failed_count += 1
             except Exception as exc:
-                logger.exception("storage upload worker failed error={}", exc)
-                # Re-raise the first exception encountered to notify user
-                raise exc
+                failed_count += 1
+                logger.warning("storage upload worker failed error={}", exc)
         elapsed = time.monotonic() - start
         logger.info(
             "storage upload batch DONE images={} success={} failed={} elapsed_ms={}",
             len(images),
             success_count,
-            len(images) - success_count,
+            failed_count,
             int(elapsed * 1000),
         )
+        if failed_count > 0:
+            logger.warning(
+                "storage upload: {} image(s) failed to upload, "
+                "fallback to base64 for model processing",
+                failed_count,
+            )
+

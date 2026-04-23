@@ -194,10 +194,11 @@ class ModelService:
         @retry_decorator
         def _do_call():
             # 使用流式 API，内部拼接完整结果
-            full_result = ""
+            # 用 list + join 避免字符串 += 的 O(n²) 内存分配
+            parts: list[str] = []
             for chunk in self._call_model_stream(messages):
-                full_result += chunk
-            return full_result
+                parts.append(chunk)
+            return "".join(parts)
 
         return _do_call()
 
@@ -234,10 +235,13 @@ class ModelService:
         logger.info(f"Split into {len(chunks)} chunks")
 
         if len(chunks) == 1:
-            return self.process_document(
+            result = self.process_document(
                 self._build_chunk_prompt(chunks[0]),
                 self._filter_chunk_images(chunks[0].text, images)
             )
+            # 与多 chunk 路径保持一致，处理完成后清理图片 base64
+            self._clear_images_base64(images)
+            return result
 
         # 串行处理每个 chunk
         results = []
@@ -371,24 +375,25 @@ class ModelService:
         try:
             logger.info("Sending request to model: {}", self._settings.model_name)
 
-            # Debug log for model input messages
-            debug_messages = []
-            for msg in messages:
-                content_copy = msg["content"]
-                if isinstance(content_copy, list):
-                    content_list = []
-                    for item in content_copy:
-                        item_copy = item.copy()
-                        if item_copy.get("type") == "image_url":
-                            url = item_copy["image_url"]["url"]
-                            if url.startswith("data:"):
-                                item_copy["image_url"]["url"] = url[:50] + "...[truncated]"
-                        content_list.append(item_copy)
-                    debug_messages.append({"role": msg["role"], "content": content_list})
-                else:
-                    debug_messages.append(msg)
-
-            logger.debug("Model request messages: {}", json.dumps(debug_messages, ensure_ascii=False))
+            # Debug log：仅在 DEBUG 级别开启时才构建拷贝，避免大文档下无意义的内存分配
+            if logger.level("DEBUG").no >= logger._core.min_level:
+                debug_messages = []
+                for msg in messages:
+                    content_copy = msg["content"]
+                    if isinstance(content_copy, list):
+                        content_list = []
+                        for item in content_copy:
+                            item_copy = item.copy()
+                            if item_copy.get("type") == "image_url":
+                                url = item_copy["image_url"]["url"]
+                                if url.startswith("data:"):
+                                    item_copy["image_url"]["url"] = url[:50] + "...[truncated]"
+                            content_list.append(item_copy)
+                        debug_messages.append({"role": msg["role"], "content": content_list})
+                    else:
+                        debug_messages.append(msg)
+                logger.debug("Model request messages: {}", json.dumps(debug_messages, ensure_ascii=False))
+                del debug_messages
 
             # 实际调用模型 API
             api_start = time.monotonic()
@@ -503,3 +508,92 @@ class ModelService:
         except Exception as e:
             logger.error(f"Stream processing error: {e}")
             raise e
+
+    @observe(name="denoise_text")
+    def denoise_text(self, markdown: str) -> str:
+        """
+        基于 LLM 的文本去噪（纯文本，不涉及图片）。
+        使用专门的去噪 Prompt 处理 OCR 后的文本噪声。
+
+        Args:
+            markdown: 待去噪的 markdown 文本
+
+        Returns:
+            去噪后的 markdown 文本
+        """
+        import time
+        overall_start = time.monotonic()
+        
+        if not self._client:
+            logger.debug("Denoise skipped: no client configured")
+            return ""
+
+        # 文本: ~3 字符/token
+        estimated_tokens = len(markdown) // 3
+        
+        # 预留一些 token 给 prompt 和模型输出
+        threshold = int(self._settings.max_input_tokens * 0.8)
+        
+        logger.info(
+            f"Denoise START: estimated_tokens={estimated_tokens}, length={len(markdown)}"
+        )
+
+        # 纯文本去噪比较简单，按 heading 或段落粗略切分即可
+        # 这里复用 TextSplitter，但没有图片
+        if estimated_tokens > threshold:
+            logger.info("Denoise text is large, processing with chunking")
+            chunks = self._splitter.split(markdown)
+            results = []
+            for chunk in chunks:
+                logger.info(f"Denoising chunk {chunk.index + 1}/{chunk.total}")
+                prompt = self._build_denoise_chunk_prompt(chunk)
+                result = self._process_denoise_single(prompt)
+                results.append(result)
+            final_result = self._merge_results(results)
+        else:
+            final_result = self._process_denoise_single(markdown)
+
+        overall_elapsed = time.monotonic() - overall_start
+        logger.info(
+            f"Denoise COMPLETE: response_length={len(final_result)} "
+            f"total_elapsed_ms={int(overall_elapsed * 1000)}"
+        )
+        return final_result
+
+    def _build_denoise_chunk_prompt(self, chunk: TextChunk) -> str:
+        """为去噪构建分块 prompt"""
+        if chunk.total == 1:
+            return chunk.text
+
+        return (
+            f"【这是文档的第 {chunk.index + 1}/{chunk.total} 部分。"
+            f"请严格保持原文内容和结构，仅删除明显噪声，不要改写正文】\n\n"
+            f"{chunk.text}"
+        )
+
+    @observe(name="_process_denoise_single")
+    def _process_denoise_single(self, text: str) -> str:
+        """调用模型进行单次文本去噪"""
+        import time
+        messages = []
+        if self._settings.denoise_prompt:
+            messages.append({"role": "system", "content": self._settings.denoise_prompt})
+        messages.append({"role": "user", "content": text})
+
+        try:
+            api_start = time.monotonic()
+            answer = self._call_model(messages)
+            api_elapsed = time.monotonic() - api_start
+            
+            logger.debug(
+                f"Denoise single call: length_in={len(text)} length_out={len(answer)} "
+                f"api_elapsed_ms={int(api_elapsed * 1000)}"
+            )
+            return answer
+        except OpenAIError as e:
+            logger.error(f"Denoise request failed after retries: {e}")
+            raise e
+        except Exception as e:
+            logger.exception(f"Unexpected error during denoise processing: {e}")
+            raise e
+

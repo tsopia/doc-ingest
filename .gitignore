@@ -24,4 +24,5 @@ wheels/
 .env.production.local
 .history/
 scripts/
+outputs/
 .DS_Store
